@@ -5,7 +5,7 @@ Configurações do Bot Syntek Gift Cards
 """
 
 # Tokens e IDs
-BOT_TOKEN = "8684385675:AAHimsCTILaTzMv2Ta3wG2Sz-oqeSSdEIGo"
+BOT_TOKEN = "8684385675:AAEWxBEjfOY5sMtOUoWtelwM-SpxclNqeOY"
 ADMIN_ID = 6462638999
 
 # Oasyfy API

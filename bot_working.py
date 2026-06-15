@@ -12,7 +12,7 @@ import string
 from datetime import datetime
 
 # Configurações
-BOT_TOKEN = "8684385675:AAHimsCTILaTzMv2Ta3wG2Sz-oqeSSdEIGo"
+BOT_TOKEN = "8684385675:AAEWxBEjfOY5sMtOUoWtelwM-SpxclNqeOY"
 ADMIN_ID = 6462638999
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
