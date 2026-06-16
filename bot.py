@@ -524,8 +524,8 @@ def verificar_pagamentos_loop():
 # ============================================================
 def enviar_promocao_loop():
     """Envia mensagem promocional a cada 2 horas para todos os usuários cadastrados."""
-    # Aguardar 2 horas antes do primeiro envio
-    time.sleep(7200)
+    # Aguardar 2 minutos antes do primeiro envio (para teste)
+    time.sleep(120)
     while True:
         try:
             usuarios = buscar_todos_usuarios()
