@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Bot Syntek Gift Cards - VERSÃO DEFINITIVA
+Bot Syntek Gift Cards - VERSÃO CORRIGIDA v2
 Webhook Flask + Oasyfy PIX + Entrega após pagamento
+Correções: payload Oasyfy, extração PIX, verificação pagamento,
+           geração aleatória de dados de cliente, setMyCommands
 """
 
 import os
@@ -11,6 +13,7 @@ import random
 import string
 import sqlite3
 import threading
+import base64
 import requests
 from flask import Flask, request, jsonify
 
@@ -24,7 +27,7 @@ OASYFY_SECRET_KEY = os.environ.get("OASYFY_CLIENT_SECRET", os.environ.get("OASYF
 _webhook_raw = os.environ.get("WEBHOOK_URL", "https://web-production-45773.up.railway.app")
 # Remover /webhook do final se já estiver presente (evitar duplicação)
 if _webhook_raw.endswith("/webhook"):
-    WEBHOOK_URL = _webhook_raw[:-8]  # remove os 8 chars de "/webhook"
+    WEBHOOK_URL = _webhook_raw[:-8]
 else:
     WEBHOOK_URL = _webhook_raw.rstrip("/")
 PORT = int(os.environ.get("PORT", 8080))
@@ -47,6 +50,46 @@ GIFT_CARDS = {
 }
 
 # ============================================================
+# GERADOR DE DADOS DE CLIENTE ALEATÓRIOS (CPF matematicamente válido)
+# ============================================================
+_NOMES = [
+    "Carlos Silva", "Ana Souza", "Pedro Lima", "Maria Costa",
+    "João Santos", "Fernanda Oliveira", "Lucas Pereira", "Julia Rocha",
+    "Rafael Alves", "Beatriz Martins", "Diego Ferreira", "Camila Gomes",
+    "Thiago Ribeiro", "Larissa Carvalho", "Mateus Barbosa", "Leticia Araujo",
+    "Rodrigo Nascimento", "Priscila Mendes", "Felipe Castro", "Vanessa Cardoso",
+]
+_DDDS = ["11", "21", "31", "41", "51", "61", "71", "81", "85", "92",
+         "19", "27", "47", "48", "62", "63", "65", "66", "67", "68"]
+
+def _gerar_cpf_valido():
+    """Gera CPF com dígitos verificadores matematicamente válidos."""
+    n = [random.randint(0, 9) for _ in range(9)]
+    # Primeiro dígito verificador
+    s = sum((10 - i) * n[i] for i in range(9))
+    d1 = 0 if (s % 11) < 2 else 11 - (s % 11)
+    n.append(d1)
+    # Segundo dígito verificador
+    s = sum((11 - i) * n[i] for i in range(10))
+    d2 = 0 if (s % 11) < 2 else 11 - (s % 11)
+    n.append(d2)
+    return "".join(map(str, n))
+
+def gerar_dados_cliente():
+    """Gera dados fictícios aleatórios com CPF matematicamente válido para cada cobrança."""
+    nome = random.choice(_NOMES)
+    ddd = random.choice(_DDDS)
+    fone = f"{ddd}9{''.join([str(random.randint(0, 9)) for _ in range(8)])}"
+    cpf = _gerar_cpf_valido()
+    email = f"cliente{random.randint(1000, 9999)}@gmail.com"
+    return {
+        "name": nome,
+        "document": cpf,
+        "email": email,
+        "phone": fone
+    }
+
+# ============================================================
 # BANCO DE DADOS
 # ============================================================
 DB_PATH = "/tmp/syntek_bot.db"
@@ -62,28 +105,51 @@ def init_db():
             valor REAL,
             status TEXT DEFAULT 'pendente',
             codigo_gift TEXT,
+            oasyfy_tx_id TEXT,
             criado_em REAL
         )
     """)
+    # Migração segura: adicionar coluna oasyfy_tx_id se não existir
+    try:
+        c.execute("ALTER TABLE transacoes ADD COLUMN oasyfy_tx_id TEXT")
+    except Exception:
+        pass  # Coluna já existe
     conn.commit()
     conn.close()
 
-def salvar_transacao(tx_id, chat_id, card_key, valor):
+def salvar_transacao(tx_id, chat_id, card_key, valor, oasyfy_tx_id=""):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO transacoes (id, chat_id, card_key, valor, status, criado_em) VALUES (?,?,?,?,?,?)",
-              (tx_id, chat_id, card_key, valor, "pendente", time.time()))
+    c.execute(
+        "INSERT OR REPLACE INTO transacoes (id, chat_id, card_key, valor, status, oasyfy_tx_id, criado_em) VALUES (?,?,?,?,?,?,?)",
+        (tx_id, chat_id, card_key, valor, "pendente", oasyfy_tx_id, time.time())
+    )
+    conn.commit()
+    conn.close()
+
+def atualizar_oasyfy_tx_id(tx_id, oasyfy_tx_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE transacoes SET oasyfy_tx_id=? WHERE id=?", (oasyfy_tx_id, tx_id))
     conn.commit()
     conn.close()
 
 def buscar_transacao(tx_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT * FROM transacoes WHERE id=?", (tx_id,))
+    c.execute("SELECT id, chat_id, card_key, valor, status, codigo_gift, oasyfy_tx_id FROM transacoes WHERE id=?", (tx_id,))
     row = c.fetchone()
     conn.close()
     if row:
-        return {"id": row[0], "chat_id": row[1], "card_key": row[2], "valor": row[3], "status": row[4], "codigo_gift": row[5]}
+        return {
+            "id": row[0],
+            "chat_id": row[1],
+            "card_key": row[2],
+            "valor": row[3],
+            "status": row[4],
+            "codigo_gift": row[5],
+            "oasyfy_tx_id": row[6] or ""
+        }
     return None
 
 def atualizar_status(tx_id, status, codigo=None):
@@ -99,8 +165,10 @@ def atualizar_status(tx_id, status, codigo=None):
 def buscar_pendentes():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, chat_id, card_key, valor FROM transacoes WHERE status='pendente' AND criado_em > ?",
-              (time.time() - 3600,))
+    c.execute(
+        "SELECT id, chat_id, card_key, valor, oasyfy_tx_id FROM transacoes WHERE status='pendente' AND criado_em > ?",
+        (time.time() - 3600,)
+    )
     rows = c.fetchall()
     conn.close()
     return rows
@@ -119,7 +187,23 @@ def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
         print(f"[ERRO] send_message: {e}")
         return None
 
-def send_photo(chat_id, photo_url, caption=None, reply_markup=None):
+def send_photo_bytes(chat_id, img_bytes, caption=None, reply_markup=None):
+    """Envia foto como bytes (para QR code em base64)."""
+    files = {"photo": ("qrcode.png", img_bytes, "image/png")}
+    data = {"chat_id": chat_id, "parse_mode": "HTML"}
+    if caption:
+        data["caption"] = caption
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    try:
+        r = requests.post(f"{TELEGRAM_API}/sendPhoto", files=files, data=data, timeout=15)
+        return r.json()
+    except Exception as e:
+        print(f"[ERRO] send_photo_bytes: {e}")
+        return None
+
+def send_photo_url(chat_id, photo_url, caption=None, reply_markup=None):
+    """Envia foto via URL."""
     payload = {"chat_id": chat_id, "photo": photo_url, "parse_mode": "HTML"}
     if caption:
         payload["caption"] = caption
@@ -129,44 +213,64 @@ def send_photo(chat_id, photo_url, caption=None, reply_markup=None):
         r = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=10)
         return r.json()
     except Exception as e:
-        print(f"[ERRO] send_photo: {e}")
+        print(f"[ERRO] send_photo_url: {e}")
         return None
 
 def answer_callback(callback_id, text=""):
     try:
         requests.post(f"{TELEGRAM_API}/answerCallbackQuery",
                       json={"callback_query_id": callback_id, "text": text}, timeout=5)
-    except:
+    except Exception:
         pass
 
+def registrar_comandos():
+    """Registra os comandos /start e /suporte no BotFather via setMyCommands."""
+    try:
+        r = requests.post(
+            f"{TELEGRAM_API}/setMyCommands",
+            json={"commands": [
+                {"command": "start",   "description": "Abrir loja de Gift Cards"},
+                {"command": "suporte", "description": "Falar com suporte"}
+            ]},
+            timeout=10
+        )
+        result = r.json()
+        if result.get("ok"):
+            print("✅ Comandos /start e /suporte registrados no Telegram")
+        else:
+            print(f"⚠️ setMyCommands: {result.get('description')}")
+    except Exception as e:
+        print(f"⚠️ Erro ao registrar comandos: {e}")
+
 # ============================================================
-# OASYFY - GERAR COBRANÇA PIX
+# OASYFY — GERAR COBRANÇA PIX (CORRIGIDO)
 # ============================================================
 def gerar_cobranca_pix(valor, descricao, tx_id):
-    """Gera cobrança PIX via Oasyfy"""
+    """Gera cobrança PIX via Oasyfy com payload correto."""
     url = "https://app.oasyfy.com/api/v1/gateway/pix/receive"
     headers = {
         "x-public-key": OASYFY_PUBLIC_KEY,
         "x-secret-key": OASYFY_SECRET_KEY,
         "Content-Type": "application/json"
     }
+    cliente = gerar_dados_cliente()
     payload = {
-        "amount": int(valor * 100),  # em centavos
+        "amount": float(valor),        # em REAIS (não centavos)
+        "identifier": tx_id,           # era "externalId" (errado)
         "description": descricao,
-        "externalId": tx_id,
-        "payer": {
-            "name": "Cliente Syntek",
-            "document": "12345678909",  # CPF fictício válido
-            "email": "cliente@syntek.com"
+        "client": {                    # era "payer" (errado)
+            "name": cliente["name"],
+            "document": cliente["document"],
+            "email": cliente["email"],
+            "phone": cliente["phone"]  # campo obrigatório que faltava
         }
     }
     try:
-        print(f"[OASYFY] Gerando cobrança: R${valor:.2f} | ID: {tx_id}")
+        print(f"[OASYFY] Gerando cobrança: R${valor:.2f} | ID: {tx_id} | Cliente: {cliente['name']}")
         r = requests.post(url, json=payload, headers=headers, timeout=15)
-        print(f"[OASYFY] Status: {r.status_code} | Resposta: {r.text[:200]}")
+        print(f"[OASYFY] Status: {r.status_code} | Resposta: {r.text[:300]}")
         if r.status_code in [200, 201]:
-            data = r.json()
-            return data
+            return r.json()
         else:
             print(f"[OASYFY] ERRO: {r.status_code} - {r.text}")
             return None
@@ -174,19 +278,32 @@ def gerar_cobranca_pix(valor, descricao, tx_id):
         print(f"[OASYFY] Exceção: {e}")
         return None
 
-def verificar_pagamento_oasyfy(tx_id):
-    """Verifica se o pagamento foi confirmado"""
-    url = f"https://app.oasyfy.com/api/v1/gateway/pix/receive/{tx_id}"
+# ============================================================
+# OASYFY — VERIFICAR PAGAMENTO (CORRIGIDO)
+# ============================================================
+def verificar_pagamento_oasyfy(oasyfy_tx_id):
+    """Verifica se o pagamento foi confirmado usando o transactionId da Oasyfy."""
+    if not oasyfy_tx_id:
+        print("[OASYFY] oasyfy_tx_id vazio — não é possível verificar")
+        return False
+    url = "https://app.oasyfy.com/api/v1/gateway/transactions"
     headers = {
         "x-public-key": OASYFY_PUBLIC_KEY,
         "x-secret-key": OASYFY_SECRET_KEY
     }
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, params={"transactionId": oasyfy_tx_id}, headers=headers, timeout=10)
+        print(f"[OASYFY] Verificação status: {r.status_code} | Resposta: {r.text[:200]}")
         if r.status_code == 200:
             data = r.json()
-            status = data.get("status", "").upper()
-            print(f"[OASYFY] Status pagamento {tx_id}: {status}")
+            # Tratar resposta como lista ou objeto
+            if isinstance(data, list) and len(data) > 0:
+                status = data[0].get("status", "").upper()
+            elif isinstance(data, dict):
+                status = data.get("status", "").upper()
+            else:
+                return False
+            print(f"[OASYFY] Status pagamento {oasyfy_tx_id}: {status}")
             return status in ["PAID", "APPROVED", "COMPLETED", "CONFIRMED"]
         return False
     except Exception as e:
@@ -220,100 +337,100 @@ def handle_start(chat_id, user_name):
             [{"text": "🍔 IFOOD 300 - R$ 89,90",    "callback_data": "comprar_ifood_300"}],
             [{"text": "🎮 STEAM 300 - R$ 89,00",    "callback_data": "comprar_steam_300"}],
             [{"text": "🎮 GOOGLE PLAY 300 - R$ 89,00", "callback_data": "comprar_gplay_300"}],
-            [{"text": "📲 SUPORTE", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+            [{"text": "📲 SUPORTE", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
         ]
     }
     send_message(chat_id, texto, reply_markup=teclado)
 
 def handle_comprar(chat_id, card_key, callback_id):
     answer_callback(callback_id, "⏳ Gerando cobrança PIX...")
-    
     if card_key not in GIFT_CARDS:
         send_message(chat_id, "❌ Gift Card inválido.")
         return
-    
     card = GIFT_CARDS[card_key]
     tx_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
-    
     print(f"[BOT] Compra: {card['nome']} R${card['preco']} | TX: {tx_id} | Chat: {chat_id}")
-    
-    # Salvar transação
     salvar_transacao(tx_id, chat_id, card_key, card["preco"])
-    
-    # Gerar cobrança Oasyfy
+
     cobranca = gerar_cobranca_pix(card["preco"], f"Gift Card {card['nome']}", tx_id)
-    
+
+    teclado = {
+        "inline_keyboard": [
+            [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
+            [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
+            [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
+        ]
+    }
+
     if cobranca:
-        # Extrair dados do PIX
-        pix_code = (cobranca.get("pixCode") or 
-                    cobranca.get("qrCode") or 
-                    cobranca.get("pix", {}).get("code") or
-                    cobranca.get("data", {}).get("pixCode") or "")
-        qr_url = (cobranca.get("qrCodeUrl") or 
-                  cobranca.get("qrCodeImage") or
-                  cobranca.get("pix", {}).get("qrCodeUrl") or
-                  cobranca.get("data", {}).get("qrCodeUrl") or "")
-        
-        print(f"[OASYFY] PIX Code: {pix_code[:50] if pix_code else 'N/A'}")
-        print(f"[OASYFY] QR URL: {qr_url[:80] if qr_url else 'N/A'}")
-        
-        texto = (
+        # Extrair campos corretos da resposta Oasyfy
+        pix_code     = cobranca.get("pix", {}).get("code", "")
+        pix_base64   = cobranca.get("pix", {}).get("base64", "")
+        oasyfy_tx_id = cobranca.get("transactionId", "")
+
+        # Salvar o transactionId da Oasyfy no banco para verificar pagamento depois
+        if oasyfy_tx_id:
+            atualizar_oasyfy_tx_id(tx_id, oasyfy_tx_id)
+            print(f"[OASYFY] transactionId salvo: {oasyfy_tx_id}")
+
+        caption = (
             f"💳 <b>PAGAMENTO PIX</b>\n\n"
             f"🎁 Produto: <b>{card['nome']}</b>\n"
             f"💰 Valor: <b>R$ {card['preco']:.2f}</b>\n\n"
             f"📋 <b>Chave PIX (Copia e Cola):</b>\n"
-            f"<code>{pix_code if pix_code else 'Gerando...'}</code>\n\n"
+            f"<code>{pix_code if pix_code else 'Aguardando...'}</code>\n\n"
             f"⏳ Após o pagamento, o código será entregue automaticamente!\n"
             f"🔄 ID: <code>{tx_id}</code>"
         )
-        
-        teclado = {
-            "inline_keyboard": [
-                [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
-                [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
-                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
-            ]
-        }
-        
-        if qr_url:
-            send_photo(chat_id, qr_url, caption=texto, reply_markup=teclado)
-        else:
-            send_message(chat_id, texto, reply_markup=teclado)
+
+        enviado = False
+
+        # Tentar enviar QR code como imagem (base64)
+        if pix_base64:
+            try:
+                b64_data = pix_base64.split(",")[-1]  # Remove prefixo "data:image/png;base64,"
+                img_bytes = base64.b64decode(b64_data)
+                result = send_photo_bytes(chat_id, img_bytes, caption=caption, reply_markup=teclado)
+                if result and result.get("ok"):
+                    enviado = True
+                    print(f"[BOT] QR code enviado como imagem para chat {chat_id}")
+            except Exception as e:
+                print(f"[BOT] Erro ao decodificar base64: {e}")
+
+        # Fallback: enviar apenas o código PIX como texto
+        if not enviado:
+            send_message(chat_id, caption, reply_markup=teclado)
     else:
-        # Fallback: mostrar mensagem de erro com suporte
         texto = (
             f"⚠️ <b>Erro ao gerar PIX</b>\n\n"
             f"Não foi possível gerar a cobrança agora.\n"
             f"Entre em contato com o suporte: {SUPORTE}"
         )
-        teclado = {
+        teclado_erro = {
             "inline_keyboard": [
                 [{"text": "🔄 Tentar Novamente", "callback_data": f"comprar_{card_key}"}],
-                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
             ]
         }
-        send_message(chat_id, texto, reply_markup=teclado)
+        send_message(chat_id, texto, reply_markup=teclado_erro)
 
 def handle_verificar(chat_id, tx_id, callback_id):
     answer_callback(callback_id, "🔍 Verificando pagamento...")
-    
     tx = buscar_transacao(tx_id)
     if not tx:
         send_message(chat_id, "❌ Transação não encontrada.")
         return
-    
     if tx["status"] == "pago":
         send_message(chat_id, f"✅ Pagamento já confirmado!\n\nSeu código: <code>{tx['codigo_gift']}</code>")
         return
-    
-    # Verificar na Oasyfy
-    pago = verificar_pagamento_oasyfy(tx_id)
-    
+
+    oasyfy_tx_id = tx.get("oasyfy_tx_id", "")
+    pago = verificar_pagamento_oasyfy(oasyfy_tx_id)
+
     if pago:
         card = GIFT_CARDS.get(tx["card_key"], {})
         codigo = gerar_codigo(card.get("prefixo", "GC"))
         atualizar_status(tx_id, "pago", codigo)
-        
         texto = (
             f"✅ <b>PAGAMENTO CONFIRMADO!</b>\n\n"
             f"🎁 Produto: <b>{card.get('nome', 'Gift Card')}</b>\n\n"
@@ -325,7 +442,7 @@ def handle_verificar(chat_id, tx_id, callback_id):
         teclado = {
             "inline_keyboard": [
                 [{"text": "🔄 /START - Comprar mais", "callback_data": "menu"}],
-                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
             ]
         }
         send_message(chat_id, texto, reply_markup=teclado)
@@ -338,7 +455,7 @@ def handle_verificar(chat_id, tx_id, callback_id):
         teclado = {
             "inline_keyboard": [
                 [{"text": "🔄 Verificar Novamente", "callback_data": f"verificar_{tx_id}"}],
-                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
             ]
         }
         send_message(chat_id, texto, reply_markup=teclado)
@@ -347,17 +464,18 @@ def handle_verificar(chat_id, tx_id, callback_id):
 # VERIFICADOR AUTOMÁTICO DE PAGAMENTOS
 # ============================================================
 def verificar_pagamentos_loop():
-    """Verifica pagamentos pendentes a cada 30 segundos"""
+    """Verifica pagamentos pendentes a cada 30 segundos."""
     while True:
         try:
             pendentes = buscar_pendentes()
-            for tx_id, chat_id, card_key, valor in pendentes:
-                pago = verificar_pagamento_oasyfy(tx_id)
+            for tx_id, chat_id, card_key, valor, oasyfy_tx_id in pendentes:
+                if not oasyfy_tx_id:
+                    continue
+                pago = verificar_pagamento_oasyfy(oasyfy_tx_id)
                 if pago:
                     card = GIFT_CARDS.get(card_key, {})
                     codigo = gerar_codigo(card.get("prefixo", "GC"))
                     atualizar_status(tx_id, "pago", codigo)
-                    
                     texto = (
                         f"✅ <b>PAGAMENTO CONFIRMADO!</b>\n\n"
                         f"🎁 Produto: <b>{card.get('nome', 'Gift Card')}</b>\n\n"
@@ -369,7 +487,7 @@ def verificar_pagamentos_loop():
                     teclado = {
                         "inline_keyboard": [
                             [{"text": "🔄 /START - Comprar mais", "callback_data": "menu"}],
-                            [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+                            [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
                         ]
                     }
                     send_message(chat_id, texto, reply_markup=teclado)
@@ -385,7 +503,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "bot": "Syntek Gift Cards", "version": "definitiva"})
+    return jsonify({"status": "ok", "bot": "Syntek Gift Cards", "version": "v2-corrigido"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -393,31 +511,23 @@ def webhook():
         update = request.get_json(force=True)
         if not update:
             return jsonify({"ok": True})
-        
         print(f"[WEBHOOK] Update recebido: {json.dumps(update)[:200]}")
-        
-        # Processar mensagem
         if "message" in update:
             msg = update["message"]
             chat_id = msg["chat"]["id"]
             user = msg.get("from", {})
             user_name = user.get("first_name", "Cliente")
             text = msg.get("text", "")
-            
             if text.startswith("/start"):
                 handle_start(chat_id, user_name)
             elif text.startswith("/suporte"):
                 send_message(chat_id, f"📲 Entre em contato com nosso suporte:\n{SUPORTE}")
-        
-        # Processar callback (botões)
         elif "callback_query" in update:
             cb = update["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
             callback_id = cb["id"]
             data = cb.get("data", "")
-            
             print(f"[WEBHOOK] Callback: {data} | Chat: {chat_id}")
-            
             if data == "menu":
                 user_name = cb.get("from", {}).get("first_name", "Cliente")
                 handle_start(chat_id, user_name)
@@ -427,9 +537,7 @@ def webhook():
             elif data.startswith("verificar_"):
                 tx_id = data.replace("verificar_", "")
                 handle_verificar(chat_id, tx_id, callback_id)
-        
         return jsonify({"ok": True})
-    
     except Exception as e:
         print(f"[WEBHOOK] ERRO: {e}")
         import traceback
@@ -441,21 +549,22 @@ def webhook():
 # ============================================================
 if __name__ == "__main__":
     print("=" * 50)
-    print("🤖 Bot Syntek Gift Cards - VERSÃO DEFINITIVA")
+    print("🤖 Bot Syntek Gift Cards - v2 CORRIGIDO")
     print(f"🔑 Token: {BOT_TOKEN[:20]}...")
     print(f"🌐 Webhook: {WEBHOOK_URL}/webhook")
     print(f"💳 Oasyfy: {OASYFY_PUBLIC_KEY[:20]}...")
     print("=" * 50)
-    
-    # Inicializar banco de dados
+
     init_db()
     print("✅ Banco de dados inicializado")
-    
-    # Configurar webhook no Telegram
+
+    # Configurar webhook do Telegram
     try:
-        r = requests.post(f"{TELEGRAM_API}/setWebhook",
-                          json={"url": f"{WEBHOOK_URL}/webhook", "drop_pending_updates": True},
-                          timeout=10)
+        r = requests.post(
+            f"{TELEGRAM_API}/setWebhook",
+            json={"url": f"{WEBHOOK_URL}/webhook", "drop_pending_updates": True},
+            timeout=10
+        )
         result = r.json()
         if result.get("ok"):
             print(f"✅ Webhook configurado: {WEBHOOK_URL}/webhook")
@@ -463,11 +572,14 @@ if __name__ == "__main__":
             print(f"⚠️ Webhook: {result.get('description')}")
     except Exception as e:
         print(f"⚠️ Erro ao configurar webhook: {e}")
-    
-    # Iniciar verificador automático de pagamentos em background
+
+    # Registrar comandos /start e /suporte no Telegram
+    registrar_comandos()
+
+    # Iniciar verificador automático de pagamentos
     t = threading.Thread(target=verificar_pagamentos_loop, daemon=True)
     t.start()
     print("✅ Verificador automático de pagamentos iniciado (30s)")
-    
+
     print(f"🚀 Flask iniciando na porta {PORT}...")
     app.run(host="0.0.0.0", port=PORT, debug=False)
