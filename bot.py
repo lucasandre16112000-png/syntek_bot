@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Bot Syntek Gift Cards - VERSÃO CORRIGIDA v2
+Bot Syntek Gift Cards - VERSÃO v3
 Webhook Flask + Oasyfy PIX + Entrega após pagamento
-Correções: payload Oasyfy, extração PIX, verificação pagamento,
-           geração aleatória de dados de cliente, setMyCommands
+Melhorias: emojis nos comandos, preços corrigidos, suporte automático,
+           texto de boas-vindas melhorado, envio promocional a cada 2h
 """
 
 import os
@@ -25,25 +25,25 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "6462638999"))
 OASYFY_PUBLIC_KEY = os.environ.get("OASYFY_CLIENT_ID", os.environ.get("OASYFY_PUBLIC_KEY", "lucasandre16112000_mepr35cra5buz30k"))
 OASYFY_SECRET_KEY = os.environ.get("OASYFY_CLIENT_SECRET", os.environ.get("OASYFY_SECRET_KEY", "76zh1cvrxisjub8u0txh5tygb65unatj2rmdppeohdnbfxmu8yy0idimycw3n0ze"))
 _webhook_raw = os.environ.get("WEBHOOK_URL", "https://web-production-45773.up.railway.app")
-# Remover /webhook do final se já estiver presente (evitar duplicação)
 if _webhook_raw.endswith("/webhook"):
     WEBHOOK_URL = _webhook_raw[:-8]
 else:
     WEBHOOK_URL = _webhook_raw.rstrip("/")
 PORT = int(os.environ.get("PORT", 8080))
 SUPORTE = "@SyntekOficial"
+SUPORTE_URL = "https://t.me/SyntekOficial"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # ============================================================
-# GIFT CARDS
+# GIFT CARDS (preços corrigidos)
 # ============================================================
 GIFT_CARDS = {
     "shopee_1000": {"nome": "🎁 SHOPEE 1000", "preco": 299.90, "prefixo": "SH10"},
-    "shopee_500":  {"nome": "🎁 SHOPEE 500",  "preco": 249.90, "prefixo": "SH5"},
+    "shopee_500":  {"nome": "🎁 SHOPEE 500",  "preco": 149.90, "prefixo": "SH5"},   # corrigido: era 249,90
     "shopee_300":  {"nome": "🎁 SHOPEE 300",  "preco": 99.90,  "prefixo": "SH3"},
     "ifood_1000":  {"nome": "🍔 IFOOD 1000",  "preco": 279.90, "prefixo": "IF10"},
-    "ifood_500":   {"nome": "🍔 IFOOD 500",   "preco": 229.90, "prefixo": "IF5"},
+    "ifood_500":   {"nome": "🍔 IFOOD 500",   "preco": 129.90, "prefixo": "IF5"},   # corrigido: era 229,90
     "ifood_300":   {"nome": "🍔 IFOOD 300",   "preco": 89.90,  "prefixo": "IF3"},
     "steam_300":   {"nome": "🎮 STEAM 300",   "preco": 89.00,  "prefixo": "ST3"},
     "gplay_300":   {"nome": "🎮 GOOGLE PLAY 300", "preco": 89.00, "prefixo": "GP3"},
@@ -65,11 +65,9 @@ _DDDS = ["11", "21", "31", "41", "51", "61", "71", "81", "85", "92",
 def _gerar_cpf_valido():
     """Gera CPF com dígitos verificadores matematicamente válidos."""
     n = [random.randint(0, 9) for _ in range(9)]
-    # Primeiro dígito verificador
     s = sum((10 - i) * n[i] for i in range(9))
     d1 = 0 if (s % 11) < 2 else 11 - (s % 11)
     n.append(d1)
-    # Segundo dígito verificador
     s = sum((11 - i) * n[i] for i in range(10))
     d2 = 0 if (s % 11) < 2 else 11 - (s % 11)
     n.append(d2)
@@ -82,12 +80,7 @@ def gerar_dados_cliente():
     fone = f"{ddd}9{''.join([str(random.randint(0, 9)) for _ in range(8)])}"
     cpf = _gerar_cpf_valido()
     email = f"cliente{random.randint(1000, 9999)}@gmail.com"
-    return {
-        "name": nome,
-        "document": cpf,
-        "email": email,
-        "phone": fone
-    }
+    return {"name": nome, "document": cpf, "email": email, "phone": fone}
 
 # ============================================================
 # BANCO DE DADOS
@@ -97,6 +90,7 @@ DB_PATH = "/tmp/syntek_bot.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Tabela de transações
     c.execute("""
         CREATE TABLE IF NOT EXISTS transacoes (
             id TEXT PRIMARY KEY,
@@ -109,13 +103,41 @@ def init_db():
             criado_em REAL
         )
     """)
-    # Migração segura: adicionar coluna oasyfy_tx_id se não existir
+    # Migração segura: coluna oasyfy_tx_id
     try:
         c.execute("ALTER TABLE transacoes ADD COLUMN oasyfy_tx_id TEXT")
     except Exception:
-        pass  # Coluna já existe
+        pass
+    # Tabela de usuários (para envio automático de promoções)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            chat_id INTEGER PRIMARY KEY,
+            primeiro_nome TEXT,
+            criado_em REAL
+        )
+    """)
     conn.commit()
     conn.close()
+
+def registrar_usuario(chat_id, primeiro_nome):
+    """Registra ou atualiza um usuário no banco."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO usuarios (chat_id, primeiro_nome, criado_em) VALUES (?,?,?)",
+        (chat_id, primeiro_nome, time.time())
+    )
+    conn.commit()
+    conn.close()
+
+def buscar_todos_usuarios():
+    """Retorna lista de todos os chat_ids cadastrados."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id FROM usuarios")
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 def salvar_transacao(tx_id, chat_id, card_key, valor, oasyfy_tx_id=""):
     conn = sqlite3.connect(DB_PATH)
@@ -142,12 +164,8 @@ def buscar_transacao(tx_id):
     conn.close()
     if row:
         return {
-            "id": row[0],
-            "chat_id": row[1],
-            "card_key": row[2],
-            "valor": row[3],
-            "status": row[4],
-            "codigo_gift": row[5],
+            "id": row[0], "chat_id": row[1], "card_key": row[2],
+            "valor": row[3], "status": row[4], "codigo_gift": row[5],
             "oasyfy_tx_id": row[6] or ""
         }
     return None
@@ -202,20 +220,6 @@ def send_photo_bytes(chat_id, img_bytes, caption=None, reply_markup=None):
         print(f"[ERRO] send_photo_bytes: {e}")
         return None
 
-def send_photo_url(chat_id, photo_url, caption=None, reply_markup=None):
-    """Envia foto via URL."""
-    payload = {"chat_id": chat_id, "photo": photo_url, "parse_mode": "HTML"}
-    if caption:
-        payload["caption"] = caption
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
-    try:
-        r = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=10)
-        return r.json()
-    except Exception as e:
-        print(f"[ERRO] send_photo_url: {e}")
-        return None
-
 def answer_callback(callback_id, text=""):
     try:
         requests.post(f"{TELEGRAM_API}/answerCallbackQuery",
@@ -224,26 +228,26 @@ def answer_callback(callback_id, text=""):
         pass
 
 def registrar_comandos():
-    """Registra os comandos /start e /suporte no BotFather via setMyCommands."""
+    """Registra os comandos /start e /suporte com emojis no BotFather via setMyCommands."""
     try:
         r = requests.post(
             f"{TELEGRAM_API}/setMyCommands",
             json={"commands": [
-                {"command": "start",   "description": "Abrir loja de Gift Cards"},
-                {"command": "suporte", "description": "Falar com suporte"}
+                {"command": "start",   "description": "🚀 Abrir loja de Gift Cards"},
+                {"command": "suporte", "description": "💬 Falar com suporte"}
             ]},
             timeout=10
         )
         result = r.json()
         if result.get("ok"):
-            print("✅ Comandos /start e /suporte registrados no Telegram")
+            print("✅ Comandos /start 🚀 e /suporte 💬 registrados no Telegram")
         else:
             print(f"⚠️ setMyCommands: {result.get('description')}")
     except Exception as e:
         print(f"⚠️ Erro ao registrar comandos: {e}")
 
 # ============================================================
-# OASYFY — GERAR COBRANÇA PIX (CORRIGIDO)
+# OASYFY — GERAR COBRANÇA PIX
 # ============================================================
 def gerar_cobranca_pix(valor, descricao, tx_id):
     """Gera cobrança PIX via Oasyfy com payload correto."""
@@ -255,14 +259,14 @@ def gerar_cobranca_pix(valor, descricao, tx_id):
     }
     cliente = gerar_dados_cliente()
     payload = {
-        "amount": float(valor),        # em REAIS (não centavos)
-        "identifier": tx_id,           # era "externalId" (errado)
+        "amount": float(valor),
+        "identifier": tx_id,
         "description": descricao,
-        "client": {                    # era "payer" (errado)
+        "client": {
             "name": cliente["name"],
             "document": cliente["document"],
             "email": cliente["email"],
-            "phone": cliente["phone"]  # campo obrigatório que faltava
+            "phone": cliente["phone"]
         }
     }
     try:
@@ -279,7 +283,7 @@ def gerar_cobranca_pix(valor, descricao, tx_id):
         return None
 
 # ============================================================
-# OASYFY — VERIFICAR PAGAMENTO (CORRIGIDO)
+# OASYFY — VERIFICAR PAGAMENTO
 # ============================================================
 def verificar_pagamento_oasyfy(oasyfy_tx_id):
     """Verifica se o pagamento foi confirmado usando o transactionId da Oasyfy."""
@@ -296,7 +300,6 @@ def verificar_pagamento_oasyfy(oasyfy_tx_id):
         print(f"[OASYFY] Verificação status: {r.status_code} | Resposta: {r.text[:200]}")
         if r.status_code == 200:
             data = r.json()
-            # Tratar resposta como lista ou objeto
             if isinstance(data, list) and len(data) > 0:
                 status = data[0].get("status", "").upper()
             elif isinstance(data, dict):
@@ -318,26 +321,51 @@ def gerar_codigo(prefixo):
     return f"{prefixo}-{nums[:4]}-{nums[4:8]}-{nums[8:12]}"
 
 # ============================================================
+# TECLADO PADRÃO DE GIFT CARDS
+# ============================================================
+def teclado_gift_cards():
+    """Retorna o inline keyboard com todos os gift cards e botão de suporte."""
+    return {
+        "inline_keyboard": [
+            [{"text": "🎁 SHOPEE 1000 - R$ 299,90", "callback_data": "comprar_shopee_1000"}],
+            [{"text": "🎁 SHOPEE 500 - R$ 149,90",  "callback_data": "comprar_shopee_500"}],
+            [{"text": "🎁 SHOPEE 300 - R$ 99,90",   "callback_data": "comprar_shopee_300"}],
+            [{"text": "🍔 IFOOD 1000 - R$ 279,90",  "callback_data": "comprar_ifood_1000"}],
+            [{"text": "🍔 IFOOD 500 - R$ 129,90",   "callback_data": "comprar_ifood_500"}],
+            [{"text": "🍔 IFOOD 300 - R$ 89,90",    "callback_data": "comprar_ifood_300"}],
+            [{"text": "🎮 STEAM 300 - R$ 89,00",    "callback_data": "comprar_steam_300"}],
+            [{"text": "🎮 GOOGLE PLAY 300 - R$ 89,00", "callback_data": "comprar_gplay_300"}],
+            [{"text": "📲 Suporte", "url": SUPORTE_URL}],
+        ]
+    }
+
+# ============================================================
 # HANDLERS DO BOT
 # ============================================================
 def handle_start(chat_id, user_name):
     print(f"[BOT] /start de {user_name} ({chat_id})")
+    registrar_usuario(chat_id, user_name)
     texto = (
         f"👋 Olá, <b>{user_name}</b>! Bem-vindo à <b>Syntek Gift Cards</b>! 🏆\n\n"
         "🎁 Escolha um Gift Card abaixo:\n"
-        "💳 Pagamento via <b>PIX</b> — entrega automática após confirmação!"
+        "💳 Pagamento via <b>PIX</b> — entrega automática após confirmação!\n\n"
+        "✅ <b>APÓS A COMPRA, VOCÊ RECEBERÁ O CÓDIGO DO GIFT CARD</b>\n"
+        "✅ <b>BASICAMENTE É SÓ ADICIONAR E USAR O SALDO.</b>\n\n"
+        "⚠️ PARA OUTROS GIFT CARDS CONTATE O SUPORTE."
+    )
+    send_message(chat_id, texto, reply_markup=teclado_gift_cards())
+
+def handle_suporte(chat_id):
+    """Envia mensagem de suporte com redirecionamento automático para o chat."""
+    texto = (
+        f"💬 <b>SUPORTE SYNTEK</b>\n\n"
+        f"Clique abaixo para falar diretamente com nosso suporte:\n"
+        f"👉 {SUPORTE}"
     )
     teclado = {
         "inline_keyboard": [
-            [{"text": "🎁 SHOPEE 1000 - R$ 299,90", "callback_data": "comprar_shopee_1000"}],
-            [{"text": "🎁 SHOPEE 500 - R$ 249,90",  "callback_data": "comprar_shopee_500"}],
-            [{"text": "🎁 SHOPEE 300 - R$ 99,90",   "callback_data": "comprar_shopee_300"}],
-            [{"text": "🍔 IFOOD 1000 - R$ 279,90",  "callback_data": "comprar_ifood_1000"}],
-            [{"text": "🍔 IFOOD 500 - R$ 229,90",   "callback_data": "comprar_ifood_500"}],
-            [{"text": "🍔 IFOOD 300 - R$ 89,90",    "callback_data": "comprar_ifood_300"}],
-            [{"text": "🎮 STEAM 300 - R$ 89,00",    "callback_data": "comprar_steam_300"}],
-            [{"text": "🎮 GOOGLE PLAY 300 - R$ 89,00", "callback_data": "comprar_gplay_300"}],
-            [{"text": "📲 SUPORTE", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
+            [{"text": "💬 Falar com Suporte Agora", "url": SUPORTE_URL}],
+            [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
         ]
     }
     send_message(chat_id, texto, reply_markup=teclado)
@@ -358,17 +386,15 @@ def handle_comprar(chat_id, card_key, callback_id):
         "inline_keyboard": [
             [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
             [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
-            [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
+            [{"text": "💬 Suporte", "url": SUPORTE_URL}],
         ]
     }
 
     if cobranca:
-        # Extrair campos corretos da resposta Oasyfy
         pix_code     = cobranca.get("pix", {}).get("code", "")
         pix_base64   = cobranca.get("pix", {}).get("base64", "")
         oasyfy_tx_id = cobranca.get("transactionId", "")
 
-        # Salvar o transactionId da Oasyfy no banco para verificar pagamento depois
         if oasyfy_tx_id:
             atualizar_oasyfy_tx_id(tx_id, oasyfy_tx_id)
             print(f"[OASYFY] transactionId salvo: {oasyfy_tx_id}")
@@ -384,11 +410,9 @@ def handle_comprar(chat_id, card_key, callback_id):
         )
 
         enviado = False
-
-        # Tentar enviar QR code como imagem (base64)
         if pix_base64:
             try:
-                b64_data = pix_base64.split(",")[-1]  # Remove prefixo "data:image/png;base64,"
+                b64_data = pix_base64.split(",")[-1]
                 img_bytes = base64.b64decode(b64_data)
                 result = send_photo_bytes(chat_id, img_bytes, caption=caption, reply_markup=teclado)
                 if result and result.get("ok"):
@@ -397,7 +421,6 @@ def handle_comprar(chat_id, card_key, callback_id):
             except Exception as e:
                 print(f"[BOT] Erro ao decodificar base64: {e}")
 
-        # Fallback: enviar apenas o código PIX como texto
         if not enviado:
             send_message(chat_id, caption, reply_markup=teclado)
     else:
@@ -409,7 +432,7 @@ def handle_comprar(chat_id, card_key, callback_id):
         teclado_erro = {
             "inline_keyboard": [
                 [{"text": "🔄 Tentar Novamente", "callback_data": f"comprar_{card_key}"}],
-                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
+                [{"text": "💬 Suporte", "url": SUPORTE_URL}],
             ]
         }
         send_message(chat_id, texto, reply_markup=teclado_erro)
@@ -442,7 +465,7 @@ def handle_verificar(chat_id, tx_id, callback_id):
         teclado = {
             "inline_keyboard": [
                 [{"text": "🔄 /START - Comprar mais", "callback_data": "menu"}],
-                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
+                [{"text": "💬 Suporte", "url": SUPORTE_URL}],
             ]
         }
         send_message(chat_id, texto, reply_markup=teclado)
@@ -455,7 +478,7 @@ def handle_verificar(chat_id, tx_id, callback_id):
         teclado = {
             "inline_keyboard": [
                 [{"text": "🔄 Verificar Novamente", "callback_data": f"verificar_{tx_id}"}],
-                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
+                [{"text": "💬 Suporte", "url": SUPORTE_URL}],
             ]
         }
         send_message(chat_id, texto, reply_markup=teclado)
@@ -487,14 +510,57 @@ def verificar_pagamentos_loop():
                     teclado = {
                         "inline_keyboard": [
                             [{"text": "🔄 /START - Comprar mais", "callback_data": "menu"}],
-                            [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@', '')}"}],
+                            [{"text": "💬 Suporte", "url": SUPORTE_URL}],
                         ]
                     }
                     send_message(chat_id, texto, reply_markup=teclado)
                     print(f"[AUTO] Pagamento confirmado e código entregue: {tx_id}")
         except Exception as e:
-            print(f"[AUTO] Erro: {e}")
+            print(f"[AUTO] Erro verificação pagamentos: {e}")
         time.sleep(30)
+
+# ============================================================
+# ENVIO AUTOMÁTICO DE PROMOÇÃO A CADA 2 HORAS
+# ============================================================
+def enviar_promocao_loop():
+    """Envia mensagem promocional a cada 2 horas para todos os usuários cadastrados."""
+    # Aguardar 2 horas antes do primeiro envio
+    time.sleep(7200)
+    while True:
+        try:
+            usuarios = buscar_todos_usuarios()
+            print(f"[PROMO] Enviando promoção para {len(usuarios)} usuários...")
+            texto_promo = (
+                "✅ <b>PROMOÇÃO</b>\n\n"
+                "🔹SHOPEE  🔹IFOOD  🔹GOOGLE PLAY\n"
+                "🔹CASAS BAHIA  🔹ROBLOX  🔹STEAM\n"
+                "🔹ZÉ DELIVERY  🔹AIRBNB\n"
+                "🔹APPLE STORE  🔹UBER\n\n"
+                "Outros Gift Cards? Chame o Suporte.\n\n"
+                "❖ <b>1000 DE SALDO</b> — R$ 299,90\n"
+                "❖ <b>500 DE SALDO</b> — R$ 139,90\n"
+                "❖ <b>300 DE SALDO</b> — R$ 89,90\n\n"
+                "⚠️ É SÓ ADICIONAR E REALIZAR AS COMPRAS, NÃO TEM SEGREDO. ✅🦅🚀"
+            )
+            teclado_promo = {
+                "inline_keyboard": [
+                    [{"text": "🚀 /GIFT CARDS — Ver todos", "callback_data": "menu"}],
+                    [{"text": "📲 Suporte", "url": SUPORTE_URL}],
+                ]
+            }
+            enviados = 0
+            erros = 0
+            for chat_id in usuarios:
+                result = send_message(chat_id, texto_promo, reply_markup=teclado_promo)
+                if result and result.get("ok"):
+                    enviados += 1
+                else:
+                    erros += 1
+                time.sleep(0.05)  # Respeitar rate limit do Telegram (20 msgs/s)
+            print(f"[PROMO] Enviados: {enviados} | Erros: {erros}")
+        except Exception as e:
+            print(f"[PROMO] Erro no loop de promoção: {e}")
+        time.sleep(7200)  # Aguardar 2 horas para o próximo envio
 
 # ============================================================
 # FLASK APP - WEBHOOK
@@ -503,7 +569,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "bot": "Syntek Gift Cards", "version": "v2-corrigido"})
+    return jsonify({"status": "ok", "bot": "Syntek Gift Cards", "version": "v3"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -521,15 +587,20 @@ def webhook():
             if text.startswith("/start"):
                 handle_start(chat_id, user_name)
             elif text.startswith("/suporte"):
-                send_message(chat_id, f"📲 Entre em contato com nosso suporte:\n{SUPORTE}")
+                registrar_usuario(chat_id, user_name)
+                handle_suporte(chat_id)
+            else:
+                # Qualquer outra mensagem: registrar usuário e mostrar menu
+                registrar_usuario(chat_id, user_name)
         elif "callback_query" in update:
             cb = update["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
             callback_id = cb["id"]
             data = cb.get("data", "")
+            user_name = cb.get("from", {}).get("first_name", "Cliente")
             print(f"[WEBHOOK] Callback: {data} | Chat: {chat_id}")
+            registrar_usuario(chat_id, user_name)
             if data == "menu":
-                user_name = cb.get("from", {}).get("first_name", "Cliente")
                 handle_start(chat_id, user_name)
             elif data.startswith("comprar_"):
                 card_key = data.replace("comprar_", "")
@@ -549,7 +620,7 @@ def webhook():
 # ============================================================
 if __name__ == "__main__":
     print("=" * 50)
-    print("🤖 Bot Syntek Gift Cards - v2 CORRIGIDO")
+    print("🤖 Bot Syntek Gift Cards - v3")
     print(f"🔑 Token: {BOT_TOKEN[:20]}...")
     print(f"🌐 Webhook: {WEBHOOK_URL}/webhook")
     print(f"💳 Oasyfy: {OASYFY_PUBLIC_KEY[:20]}...")
@@ -573,13 +644,18 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"⚠️ Erro ao configurar webhook: {e}")
 
-    # Registrar comandos /start e /suporte no Telegram
+    # Registrar comandos /start 🚀 e /suporte 💬 no Telegram
     registrar_comandos()
 
-    # Iniciar verificador automático de pagamentos
-    t = threading.Thread(target=verificar_pagamentos_loop, daemon=True)
-    t.start()
+    # Iniciar verificador automático de pagamentos (thread)
+    t1 = threading.Thread(target=verificar_pagamentos_loop, daemon=True)
+    t1.start()
     print("✅ Verificador automático de pagamentos iniciado (30s)")
+
+    # Iniciar loop de envio promocional a cada 2 horas (thread)
+    t2 = threading.Thread(target=enviar_promocao_loop, daemon=True)
+    t2.start()
+    print("✅ Loop de promoção automática iniciado (a cada 2h)")
 
     print(f"🚀 Flask iniciando na porta {PORT}...")
     app.run(host="0.0.0.0", port=PORT, debug=False)
