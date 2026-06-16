@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-Bot Syntek Gift Cards v5.0 - WEBHOOK MODE
-- Usa Flask + Webhook (mais confiável no Railway)
-- Integração Oasyfy REAL
-- Fluxo de pagamento PIX antes de entregar gift card
-- Sem link de grupo estranho
-- Botões /START e SUPORTE após compra
+Bot Syntek Gift Cards - VERSÃO DEFINITIVA
+Webhook Flask + Oasyfy PIX + Entrega após pagamento
 """
 
 import os
@@ -14,19 +10,9 @@ import time
 import random
 import string
 import sqlite3
-import requests
 import threading
-import uuid
-import logging
+import requests
 from flask import Flask, request, jsonify
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -35,9 +21,9 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8684385675:AAEWxBEjfOY5sMtOUoWtelwM-Spx
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6462638999"))
 OASYFY_PUBLIC_KEY = os.environ.get("OASYFY_PUBLIC_KEY", "lucasandre16112000_mepr35cra5buz30k")
 OASYFY_SECRET_KEY = os.environ.get("OASYFY_SECRET_KEY", "76zh1cvrxisjub8u0txh5tygb65unatj2rmdppeohdnbfxmu8yy0idimycw3n0ze")
-OASYFY_BASE_URL = "https://app.oasyfy.com/api/v1"
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://worker-production-0daf.up.railway.app")
 PORT = int(os.environ.get("PORT", 8080))
+SUPORTE = "@SyntekOficial"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -45,14 +31,14 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # GIFT CARDS
 # ============================================================
 GIFT_CARDS = {
-    "shopee_1000": {"nome": "🎁 SHOPEE 1000", "valor": 299.90, "prefixo": "SH1K"},
-    "shopee_500":  {"nome": "🎁 SHOPEE 500",  "valor": 249.90, "prefixo": "SH5C"},
-    "shopee_300":  {"nome": "🎁 SHOPEE 300",  "valor": 99.90,  "prefixo": "SH3C"},
-    "ifood_1000":  {"nome": "🍔 IFOOD 1000",  "valor": 279.90, "prefixo": "IF1K"},
-    "ifood_500":   {"nome": "🍔 IFOOD 500",   "valor": 229.90, "prefixo": "IF5C"},
-    "ifood_300":   {"nome": "🍔 IFOOD 300",   "valor": 89.90,  "prefixo": "IF3C"},
-    "steam_300":   {"nome": "🎮 STEAM 300",   "valor": 89.00,  "prefixo": "STM"},
-    "gplay_300":   {"nome": "🎮 GOOGLE PLAY 300", "valor": 89.00, "prefixo": "GPY"},
+    "shopee_1000": {"nome": "🎁 SHOPEE 1000", "preco": 299.90, "prefixo": "SH10"},
+    "shopee_500":  {"nome": "🎁 SHOPEE 500",  "preco": 249.90, "prefixo": "SH5"},
+    "shopee_300":  {"nome": "🎁 SHOPEE 300",  "preco": 99.90,  "prefixo": "SH3"},
+    "ifood_1000":  {"nome": "🍔 IFOOD 1000",  "preco": 279.90, "prefixo": "IF10"},
+    "ifood_500":   {"nome": "🍔 IFOOD 500",   "preco": 229.90, "prefixo": "IF5"},
+    "ifood_300":   {"nome": "🍔 IFOOD 300",   "preco": 89.90,  "prefixo": "IF3"},
+    "steam_300":   {"nome": "🎮 STEAM 300",   "preco": 89.00,  "prefixo": "ST3"},
+    "gplay_300":   {"nome": "🎮 GOOGLE PLAY 300", "preco": 89.00, "prefixo": "GP3"},
 }
 
 # ============================================================
@@ -65,435 +51,418 @@ def init_db():
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS transacoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            transaction_id TEXT NOT NULL,
-            identifier TEXT NOT NULL,
-            card_key TEXT NOT NULL,
-            valor REAL NOT NULL,
-            status TEXT DEFAULT 'PENDING',
+            id TEXT PRIMARY KEY,
+            chat_id INTEGER,
+            card_key TEXT,
+            valor REAL,
+            status TEXT DEFAULT 'pendente',
             codigo_gift TEXT,
-            criado_em INTEGER NOT NULL
+            criado_em REAL
         )
     """)
     conn.commit()
     conn.close()
-    logger.info("✅ Banco de dados inicializado")
 
-def salvar_transacao(chat_id, transaction_id, identifier, card_key, valor):
+def salvar_transacao(tx_id, chat_id, card_key, valor):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
-        INSERT INTO transacoes (chat_id, transaction_id, identifier, card_key, valor, status, criado_em)
-        VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-    """, (chat_id, transaction_id, identifier, card_key, valor, int(time.time())))
+    c.execute("INSERT OR REPLACE INTO transacoes (id, chat_id, card_key, valor, status, criado_em) VALUES (?,?,?,?,?,?)",
+              (tx_id, chat_id, card_key, valor, "pendente", time.time()))
+    conn.commit()
+    conn.close()
+
+def buscar_transacao(tx_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM transacoes WHERE id=?", (tx_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"id": row[0], "chat_id": row[1], "card_key": row[2], "valor": row[3], "status": row[4], "codigo_gift": row[5]}
+    return None
+
+def atualizar_status(tx_id, status, codigo=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if codigo:
+        c.execute("UPDATE transacoes SET status=?, codigo_gift=? WHERE id=?", (status, codigo, tx_id))
+    else:
+        c.execute("UPDATE transacoes SET status=? WHERE id=?", (status, tx_id))
     conn.commit()
     conn.close()
 
 def buscar_pendentes():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
-        SELECT id, chat_id, transaction_id, card_key
-        FROM transacoes
-        WHERE status = 'PENDING' AND criado_em > ?
-    """, (int(time.time()) - 3600,))
+    c.execute("SELECT id, chat_id, card_key, valor FROM transacoes WHERE status='pendente' AND criado_em > ?",
+              (time.time() - 3600,))
     rows = c.fetchall()
     conn.close()
     return rows
 
-def atualizar_status(transaction_id, status, codigo=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        UPDATE transacoes SET status = ?, codigo_gift = ? WHERE transaction_id = ?
-    """, (status, codigo, transaction_id))
-    conn.commit()
-    conn.close()
-
-def buscar_card_key(transaction_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT card_key FROM transacoes WHERE transaction_id = ?", (transaction_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
 # ============================================================
-# FUNÇÕES TELEGRAM
+# TELEGRAM API
 # ============================================================
-def enviar_mensagem(chat_id, texto, teclado=None, parse_mode="Markdown"):
-    url = f"{TELEGRAM_API}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": texto,
-        "parse_mode": parse_mode
-    }
-    if teclado:
-        payload["reply_markup"] = json.dumps(teclado)
+def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     try:
-        r = requests.post(url, json=payload, timeout=15)
-        result = r.json()
-        if not result.get("ok"):
-            logger.error(f"Erro Telegram sendMessage: {result}")
-        return result
+        r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
+        return r.json()
     except Exception as e:
-        logger.error(f"Exceção ao enviar mensagem: {e}")
+        print(f"[ERRO] send_message: {e}")
         return None
 
-def responder_callback(callback_query_id, texto=""):
-    url = f"{TELEGRAM_API}/answerCallbackQuery"
+def send_photo(chat_id, photo_url, caption=None, reply_markup=None):
+    payload = {"chat_id": chat_id, "photo": photo_url, "parse_mode": "HTML"}
+    if caption:
+        payload["caption"] = caption
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     try:
-        requests.post(url, json={"callback_query_id": callback_query_id, "text": texto}, timeout=10)
+        r = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=10)
+        return r.json()
     except Exception as e:
-        logger.error(f"Erro ao responder callback: {e}")
+        print(f"[ERRO] send_photo: {e}")
+        return None
+
+def answer_callback(callback_id, text=""):
+    try:
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery",
+                      json={"callback_query_id": callback_id, "text": text}, timeout=5)
+    except:
+        pass
 
 # ============================================================
-# FUNÇÕES OASYFY
+# OASYFY - GERAR COBRANÇA PIX
 # ============================================================
-def criar_cobranca_pix(chat_id, card_key, valor, nome_card):
+def gerar_cobranca_pix(valor, descricao, tx_id):
+    """Gera cobrança PIX via Oasyfy"""
+    url = "https://app.oasyfy.com/api/v1/gateway/pix/receive"
     headers = {
         "x-public-key": OASYFY_PUBLIC_KEY,
         "x-secret-key": OASYFY_SECRET_KEY,
         "Content-Type": "application/json"
     }
-    identifier = f"syntek_{chat_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     payload = {
-        "identifier": identifier,
-        "amount": valor,
-        "client": {
-            "name": f"Cliente {chat_id}",
-            "email": f"cliente{chat_id}@syntek.bot",
-            "phone": "11999999999",
-            "document": "529.982.247-25"
-        },
-        "products": [
-            {
-                "id": card_key,
-                "name": nome_card,
-                "quantity": 1,
-                "price": valor
-            }
-        ]
+        "amount": int(valor * 100),  # em centavos
+        "description": descricao,
+        "externalId": tx_id,
+        "payer": {
+            "name": "Cliente Syntek",
+            "document": "12345678909",  # CPF fictício válido
+            "email": "cliente@syntek.com"
+        }
     }
     try:
-        r = requests.post(
-            f"{OASYFY_BASE_URL}/gateway/pix/receive",
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-        logger.info(f"Oasyfy PIX: {r.status_code} - {r.text[:400]}")
+        print(f"[OASYFY] Gerando cobrança: R${valor:.2f} | ID: {tx_id}")
+        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        print(f"[OASYFY] Status: {r.status_code} | Resposta: {r.text[:200]}")
         if r.status_code in [200, 201]:
             data = r.json()
-            pix_data = data.get("pix", {})
-            return {
-                "transaction_id": data.get("transactionId") or data.get("id"),
-                "identifier": identifier,
-                "pix_code": pix_data.get("code") or pix_data.get("qrCode") or pix_data.get("copyPaste"),
-                "pix_url": pix_data.get("url"),
-                "status": data.get("status")
-            }
+            return data
         else:
-            logger.error(f"Erro Oasyfy {r.status_code}: {r.text}")
+            print(f"[OASYFY] ERRO: {r.status_code} - {r.text}")
             return None
     except Exception as e:
-        logger.error(f"Exceção Oasyfy: {e}")
+        print(f"[OASYFY] Exceção: {e}")
         return None
 
-def verificar_pagamento(transaction_id):
+def verificar_pagamento_oasyfy(tx_id):
+    """Verifica se o pagamento foi confirmado"""
+    url = f"https://app.oasyfy.com/api/v1/gateway/pix/receive/{tx_id}"
     headers = {
         "x-public-key": OASYFY_PUBLIC_KEY,
         "x-secret-key": OASYFY_SECRET_KEY
     }
     try:
-        r = requests.get(
-            f"{OASYFY_BASE_URL}/transactions/{transaction_id}",
-            headers=headers,
-            timeout=15
-        )
+        r = requests.get(url, headers=headers, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            return data.get("status")
-        return None
+            status = data.get("status", "").upper()
+            print(f"[OASYFY] Status pagamento {tx_id}: {status}")
+            return status in ["PAID", "APPROVED", "COMPLETED", "CONFIRMED"]
+        return False
     except Exception as e:
-        logger.error(f"Erro verificar pagamento: {e}")
-        return None
+        print(f"[OASYFY] Erro verificação: {e}")
+        return False
 
 # ============================================================
-# GERAÇÃO DE CÓDIGOS
+# GERADOR DE CÓDIGO GIFT CARD
 # ============================================================
 def gerar_codigo(prefixo):
-    p1 = ''.join(random.choices(string.digits, k=4))
-    p2 = ''.join(random.choices(string.digits, k=4))
-    p3 = ''.join(random.choices(string.digits, k=4))
-    return f"{prefixo}-{p1}-{p2}-{p3}"
+    nums = ''.join(random.choices(string.digits, k=12))
+    return f"{prefixo}-{nums[:4]}-{nums[4:8]}-{nums[8:12]}"
 
 # ============================================================
-# TECLADOS
+# HANDLERS DO BOT
 # ============================================================
-def teclado_menu():
-    botoes = []
-    for key, card in GIFT_CARDS.items():
-        botoes.append([{"text": f"{card['nome']} - R$ {card['valor']:.2f}", "callback_data": f"comprar_{key}"}])
-    botoes.append([{"text": "📲 SUPORTE", "callback_data": "suporte"}])
-    return {"inline_keyboard": botoes}
-
-def teclado_pos_compra():
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "🔄 /START - Voltar ao Menu", "callback_data": "start"},
-                {"text": "📲 SUPORTE", "callback_data": "suporte"}
-            ]
-        ]
-    }
-
-def teclado_aguardando(transaction_id):
-    return {
-        "inline_keyboard": [
-            [{"text": "✅ Já paguei - Verificar", "callback_data": f"verificar_{transaction_id}"}],
-            [{"text": "❌ Cancelar", "callback_data": "cancelar"}],
-            [{"text": "📲 SUPORTE", "callback_data": "suporte"}]
-        ]
-    }
-
-# ============================================================
-# HANDLERS
-# ============================================================
-def handle_start(chat_id, nome=""):
+def handle_start(chat_id, user_name):
+    print(f"[BOT] /start de {user_name} ({chat_id})")
     texto = (
-        f"💰 *Bem-vindo ao Syntek Gift Cards!*\n\n"
-        f"Olá {nome}! 👋\n\n"
-        f"🎁 *CÓDIGO DO GIFT CARD*\n"
-        f"✅ Basicamente é só adicionar e usar o saldo.\n\n"
-        f"⚠️ *PARA OUTROS GIFT CARDS CONTATE O SUPORTE.*\n\n"
-        f"Escolha seu Gift Card abaixo:"
+        f"👋 Olá, <b>{user_name}</b>! Bem-vindo à <b>Syntek Gift Cards</b>! 🏆\n\n"
+        "🎁 Escolha um Gift Card abaixo:\n"
+        "💳 Pagamento via <b>PIX</b> — entrega automática após confirmação!"
     )
-    enviar_mensagem(chat_id, texto, teclado=teclado_menu())
-    logger.info(f"✅ /start → chat_id={chat_id}")
+    teclado = {
+        "inline_keyboard": [
+            [{"text": "🎁 SHOPEE 1000 - R$ 299,90", "callback_data": "comprar_shopee_1000"}],
+            [{"text": "🎁 SHOPEE 500 - R$ 249,90",  "callback_data": "comprar_shopee_500"}],
+            [{"text": "🎁 SHOPEE 300 - R$ 99,90",   "callback_data": "comprar_shopee_300"}],
+            [{"text": "🍔 IFOOD 1000 - R$ 279,90",  "callback_data": "comprar_ifood_1000"}],
+            [{"text": "🍔 IFOOD 500 - R$ 229,90",   "callback_data": "comprar_ifood_500"}],
+            [{"text": "🍔 IFOOD 300 - R$ 89,90",    "callback_data": "comprar_ifood_300"}],
+            [{"text": "🎮 STEAM 300 - R$ 89,00",    "callback_data": "comprar_steam_300"}],
+            [{"text": "🎮 GOOGLE PLAY 300 - R$ 89,00", "callback_data": "comprar_gplay_300"}],
+            [{"text": "📲 SUPORTE", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+        ]
+    }
+    send_message(chat_id, texto, reply_markup=teclado)
 
-def handle_comprar(chat_id, card_key, cq_id):
-    responder_callback(cq_id, "⏳ Gerando cobrança PIX...")
+def handle_comprar(chat_id, card_key, callback_id):
+    answer_callback(callback_id, "⏳ Gerando cobrança PIX...")
+    
     if card_key not in GIFT_CARDS:
-        enviar_mensagem(chat_id, "❌ Gift Card não encontrado.")
+        send_message(chat_id, "❌ Gift Card inválido.")
         return
+    
     card = GIFT_CARDS[card_key]
-    resultado = criar_cobranca_pix(chat_id, card_key, card["valor"], card["nome"])
-    if not resultado or not resultado.get("transaction_id"):
-        enviar_mensagem(
-            chat_id,
-            "❌ *Erro ao gerar cobrança PIX*\n\nTente novamente ou contate o suporte.\n📲 @SyntekOficial",
-            teclado=teclado_pos_compra()
+    tx_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+    
+    print(f"[BOT] Compra: {card['nome']} R${card['preco']} | TX: {tx_id} | Chat: {chat_id}")
+    
+    # Salvar transação
+    salvar_transacao(tx_id, chat_id, card_key, card["preco"])
+    
+    # Gerar cobrança Oasyfy
+    cobranca = gerar_cobranca_pix(card["preco"], f"Gift Card {card['nome']}", tx_id)
+    
+    if cobranca:
+        # Extrair dados do PIX
+        pix_code = (cobranca.get("pixCode") or 
+                    cobranca.get("qrCode") or 
+                    cobranca.get("pix", {}).get("code") or
+                    cobranca.get("data", {}).get("pixCode") or "")
+        qr_url = (cobranca.get("qrCodeUrl") or 
+                  cobranca.get("qrCodeImage") or
+                  cobranca.get("pix", {}).get("qrCodeUrl") or
+                  cobranca.get("data", {}).get("qrCodeUrl") or "")
+        
+        print(f"[OASYFY] PIX Code: {pix_code[:50] if pix_code else 'N/A'}")
+        print(f"[OASYFY] QR URL: {qr_url[:80] if qr_url else 'N/A'}")
+        
+        texto = (
+            f"💳 <b>PAGAMENTO PIX</b>\n\n"
+            f"🎁 Produto: <b>{card['nome']}</b>\n"
+            f"💰 Valor: <b>R$ {card['preco']:.2f}</b>\n\n"
+            f"📋 <b>Chave PIX (Copia e Cola):</b>\n"
+            f"<code>{pix_code if pix_code else 'Gerando...'}</code>\n\n"
+            f"⏳ Após o pagamento, o código será entregue automaticamente!\n"
+            f"🔄 ID: <code>{tx_id}</code>"
         )
-        return
-    transaction_id = resultado["transaction_id"]
-    pix_code = resultado.get("pix_code", "Código não disponível")
-    salvar_transacao(chat_id, transaction_id, resultado["identifier"], card_key, card["valor"])
-    texto = (
-        f"💳 *Pagamento via PIX*\n\n"
-        f"🎁 *Produto:* {card['nome']}\n"
-        f"💰 *Valor:* R$ {card['valor']:.2f}\n\n"
-        f"📋 *Chave PIX (Copia e Cola):*\n"
-        f"`{pix_code}`\n\n"
-        f"⏰ *Prazo:* 30 minutos\n\n"
-        f"✅ Após pagar, clique em *'Já paguei - Verificar'*"
-    )
-    enviar_mensagem(chat_id, texto, teclado=teclado_aguardando(transaction_id))
-    logger.info(f"✅ PIX gerado: transaction_id={transaction_id}")
-
-def handle_verificar(chat_id, transaction_id, cq_id):
-    responder_callback(cq_id, "🔍 Verificando...")
-    status = verificar_pagamento(transaction_id)
-    logger.info(f"Status pagamento {transaction_id}: {status}")
-    if status == "OK":
-        card_key = buscar_card_key(transaction_id)
-        card = GIFT_CARDS.get(card_key, {})
-        codigo = gerar_codigo(card.get("prefixo", "GC"))
-        atualizar_status(transaction_id, "PAID", codigo)
-        enviar_mensagem(
-            chat_id,
-            f"✅ *PAGAMENTO APROVADO!*\n\n"
-            f"🎁 *Gift Card:* {card.get('nome','')}\n\n"
-            f"🔑 *Código:*\n`{codigo}`\n\n"
-            f"✅ Adicione e use o saldo!\n⚠️ Para outros Gift Cards, contate o suporte.",
-            teclado=teclado_pos_compra()
-        )
-    elif status == "PENDING":
-        enviar_mensagem(chat_id, "⏳ *Pagamento ainda não confirmado*\n\nAguarde e tente novamente.", teclado=teclado_aguardando(transaction_id))
+        
+        teclado = {
+            "inline_keyboard": [
+                [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
+                [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
+                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+            ]
+        }
+        
+        if qr_url:
+            send_photo(chat_id, qr_url, caption=texto, reply_markup=teclado)
+        else:
+            send_message(chat_id, texto, reply_markup=teclado)
     else:
-        enviar_mensagem(chat_id, f"❌ *Pagamento não encontrado*\n\nStatus: {status}\n\nContate o suporte.", teclado=teclado_pos_compra())
+        # Fallback: mostrar mensagem de erro com suporte
+        texto = (
+            f"⚠️ <b>Erro ao gerar PIX</b>\n\n"
+            f"Não foi possível gerar a cobrança agora.\n"
+            f"Entre em contato com o suporte: {SUPORTE}"
+        )
+        teclado = {
+            "inline_keyboard": [
+                [{"text": "🔄 Tentar Novamente", "callback_data": f"comprar_{card_key}"}],
+                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+            ]
+        }
+        send_message(chat_id, texto, reply_markup=teclado)
 
-def handle_suporte(chat_id, cq_id):
-    responder_callback(cq_id)
-    enviar_mensagem(chat_id, "📲 *SUPORTE SYNTEK*\n\n👤 @SyntekOficial\n\nHorário: 24/7")
-
-def handle_cancelar(chat_id, cq_id):
-    responder_callback(cq_id, "❌ Cancelado")
-    enviar_mensagem(chat_id, "❌ Pedido cancelado.\n\nVolte quando quiser!", teclado=teclado_menu())
+def handle_verificar(chat_id, tx_id, callback_id):
+    answer_callback(callback_id, "🔍 Verificando pagamento...")
+    
+    tx = buscar_transacao(tx_id)
+    if not tx:
+        send_message(chat_id, "❌ Transação não encontrada.")
+        return
+    
+    if tx["status"] == "pago":
+        send_message(chat_id, f"✅ Pagamento já confirmado!\n\nSeu código: <code>{tx['codigo_gift']}</code>")
+        return
+    
+    # Verificar na Oasyfy
+    pago = verificar_pagamento_oasyfy(tx_id)
+    
+    if pago:
+        card = GIFT_CARDS.get(tx["card_key"], {})
+        codigo = gerar_codigo(card.get("prefixo", "GC"))
+        atualizar_status(tx_id, "pago", codigo)
+        
+        texto = (
+            f"✅ <b>PAGAMENTO CONFIRMADO!</b>\n\n"
+            f"🎁 Produto: <b>{card.get('nome', 'Gift Card')}</b>\n\n"
+            f"🔑 <b>Seu Código:</b>\n"
+            f"<code>{codigo}</code>\n\n"
+            f"✅ Basicamente é só adicionar e usar o saldo!\n"
+            f"⚠️ Para outros Gift Cards, contate o suporte."
+        )
+        teclado = {
+            "inline_keyboard": [
+                [{"text": "🔄 /START - Comprar mais", "callback_data": "menu"}],
+                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+            ]
+        }
+        send_message(chat_id, texto, reply_markup=teclado)
+    else:
+        texto = (
+            "⏳ <b>Pagamento ainda não confirmado</b>\n\n"
+            "Aguarde alguns instantes e tente novamente.\n"
+            "O pagamento PIX pode levar até 2 minutos para ser processado."
+        )
+        teclado = {
+            "inline_keyboard": [
+                [{"text": "🔄 Verificar Novamente", "callback_data": f"verificar_{tx_id}"}],
+                [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+            ]
+        }
+        send_message(chat_id, texto, reply_markup=teclado)
 
 # ============================================================
-# VERIFICADOR AUTOMÁTICO
+# VERIFICADOR AUTOMÁTICO DE PAGAMENTOS
 # ============================================================
-def verificador_automatico():
+def verificar_pagamentos_loop():
+    """Verifica pagamentos pendentes a cada 30 segundos"""
     while True:
         try:
-            for row in buscar_pendentes():
-                _, chat_id, transaction_id, card_key = row
-                status = verificar_pagamento(transaction_id)
-                if status == "OK":
+            pendentes = buscar_pendentes()
+            for tx_id, chat_id, card_key, valor in pendentes:
+                pago = verificar_pagamento_oasyfy(tx_id)
+                if pago:
                     card = GIFT_CARDS.get(card_key, {})
                     codigo = gerar_codigo(card.get("prefixo", "GC"))
-                    atualizar_status(transaction_id, "PAID", codigo)
-                    enviar_mensagem(
-                        chat_id,
-                        f"✅ *PAGAMENTO APROVADO!*\n\n"
-                        f"🎁 *Gift Card:* {card.get('nome','')}\n\n"
-                        f"🔑 *Código:*\n`{codigo}`\n\n"
-                        f"✅ Adicione e use o saldo!",
-                        teclado=teclado_pos_compra()
+                    atualizar_status(tx_id, "pago", codigo)
+                    
+                    texto = (
+                        f"✅ <b>PAGAMENTO CONFIRMADO!</b>\n\n"
+                        f"🎁 Produto: <b>{card.get('nome', 'Gift Card')}</b>\n\n"
+                        f"🔑 <b>Seu Código:</b>\n"
+                        f"<code>{codigo}</code>\n\n"
+                        f"✅ Basicamente é só adicionar e usar o saldo!\n"
+                        f"⚠️ Para outros Gift Cards, contate o suporte."
                     )
-                    logger.info(f"✅ Auto-entrega: chat_id={chat_id}")
-                elif status in ["FAILED", "CANCELED"]:
-                    atualizar_status(transaction_id, status)
+                    teclado = {
+                        "inline_keyboard": [
+                            [{"text": "🔄 /START - Comprar mais", "callback_data": "menu"}],
+                            [{"text": "📲 Suporte", "url": f"https://t.me/{SUPORTE.replace('@','')}"}],
+                        ]
+                    }
+                    send_message(chat_id, texto, reply_markup=teclado)
+                    print(f"[AUTO] Pagamento confirmado e código entregue: {tx_id}")
         except Exception as e:
-            logger.error(f"Erro verificador: {e}")
+            print(f"[AUTO] Erro: {e}")
         time.sleep(30)
 
 # ============================================================
-# WEBHOOK FLASK
+# FLASK APP - WEBHOOK
 # ============================================================
-@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    try:
-        update = request.get_json()
-        logger.info(f"📨 Update recebido: {json.dumps(update)[:200]}")
-        processar_update(update)
-        return jsonify({"ok": True})
-    except Exception as e:
-        logger.error(f"Erro no webhook: {e}")
-        return jsonify({"ok": False}), 500
-
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "bot": "Syntek Gift Cards v5.0"})
+app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
-def index():
-    return jsonify({"status": "running", "version": "5.0"})
+def health():
+    return jsonify({"status": "ok", "bot": "Syntek Gift Cards", "version": "definitiva"})
 
-def processar_update(update):
+@app.route("/webhook", methods=["POST"])
+def webhook():
     try:
+        update = request.get_json(force=True)
+        if not update:
+            return jsonify({"ok": True})
+        
+        print(f"[WEBHOOK] Update recebido: {json.dumps(update)[:200]}")
+        
+        # Processar mensagem
         if "message" in update:
             msg = update["message"]
             chat_id = msg["chat"]["id"]
-            texto = msg.get("text", "")
-            nome = msg.get("from", {}).get("first_name", "")
-            logger.info(f"📨 Mensagem: chat_id={chat_id}, texto='{texto}'")
-            if texto in ["/start", "/Start", "start"]:
-                handle_start(chat_id, nome)
-            elif texto == "/suporte":
-                enviar_mensagem(chat_id, "📲 *SUPORTE SYNTEK*\n\n👤 @SyntekOficial")
+            user = msg.get("from", {})
+            user_name = user.get("first_name", "Cliente")
+            text = msg.get("text", "")
+            
+            if text.startswith("/start"):
+                handle_start(chat_id, user_name)
+            elif text.startswith("/suporte"):
+                send_message(chat_id, f"📲 Entre em contato com nosso suporte:\n{SUPORTE}")
+        
+        # Processar callback (botões)
         elif "callback_query" in update:
-            cq = update["callback_query"]
-            chat_id = cq["message"]["chat"]["id"]
-            data = cq.get("data", "")
-            cq_id = cq["id"]
-            nome = cq.get("from", {}).get("first_name", "")
-            logger.info(f"🔘 Callback: chat_id={chat_id}, data='{data}'")
-            if data == "start":
-                responder_callback(cq_id)
-                handle_start(chat_id, nome)
+            cb = update["callback_query"]
+            chat_id = cb["message"]["chat"]["id"]
+            callback_id = cb["id"]
+            data = cb.get("data", "")
+            
+            print(f"[WEBHOOK] Callback: {data} | Chat: {chat_id}")
+            
+            if data == "menu":
+                user_name = cb.get("from", {}).get("first_name", "Cliente")
+                handle_start(chat_id, user_name)
             elif data.startswith("comprar_"):
-                handle_comprar(chat_id, data.replace("comprar_", ""), cq_id)
+                card_key = data.replace("comprar_", "")
+                handle_comprar(chat_id, card_key, callback_id)
             elif data.startswith("verificar_"):
-                handle_verificar(chat_id, data.replace("verificar_", ""), cq_id)
-            elif data == "suporte":
-                handle_suporte(chat_id, cq_id)
-            elif data == "cancelar":
-                handle_cancelar(chat_id, cq_id)
+                tx_id = data.replace("verificar_", "")
+                handle_verificar(chat_id, tx_id, callback_id)
+        
+        return jsonify({"ok": True})
+    
     except Exception as e:
-        logger.error(f"Erro processar_update: {e}", exc_info=True)
-
-# ============================================================
-# CONFIGURAR WEBHOOK
-# ============================================================
-def configurar_webhook():
-    if not WEBHOOK_URL:
-        logger.warning("⚠️ WEBHOOK_URL não configurada! Usando polling como fallback...")
-        return False
-    url = f"{TELEGRAM_API}/setWebhook"
-    webhook_endpoint = f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}"
-    try:
-        r = requests.post(url, json={"url": webhook_endpoint}, timeout=15)
-        result = r.json()
-        if result.get("ok"):
-            logger.info(f"✅ Webhook configurado: {webhook_endpoint}")
-            return True
-        else:
-            logger.error(f"❌ Erro ao configurar webhook: {result}")
-            return False
-    except Exception as e:
-        logger.error(f"Exceção ao configurar webhook: {e}")
-        return False
-
-# ============================================================
-# POLLING FALLBACK (caso não tenha WEBHOOK_URL)
-# ============================================================
-def polling_loop():
-    logger.info("🔄 Iniciando polling mode...")
-    requests.get(f"{TELEGRAM_API}/deleteWebhook", timeout=10)
-    offset = 0
-    while True:
-        try:
-            r = requests.get(
-                f"{TELEGRAM_API}/getUpdates",
-                params={"offset": offset, "timeout": 10, "limit": 10},
-                timeout=20
-            )
-            if r.status_code == 200:
-                data = r.json()
-                if data.get("ok"):
-                    for update in data.get("result", []):
-                        offset = update["update_id"] + 1
-                        processar_update(update)
-            elif r.status_code == 409:
-                logger.warning("⚠️ Conflito de instância. Aguardando...")
-                time.sleep(10)
-            else:
-                time.sleep(3)
-        except requests.exceptions.Timeout:
-            pass
-        except Exception as e:
-            logger.error(f"Erro polling: {e}")
-            time.sleep(3)
+        print(f"[WEBHOOK] ERRO: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": True})
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    init_db()
-    logger.info("✅ Bot Syntek Gift Cards v5.0 iniciado!")
-    logger.info(f"✅ Token: {BOT_TOKEN[:20]}...")
-    logger.info(f"✅ Oasyfy: {OASYFY_PUBLIC_KEY[:20]}...")
-    logger.info(f"✅ PORT: {PORT}")
-    logger.info(f"✅ WEBHOOK_URL: {WEBHOOK_URL or 'NÃO CONFIGURADA'}")
-
-    # Iniciar verificador automático
-    t = threading.Thread(target=verificador_automatico, daemon=True)
-    t.start()
-    logger.info("✅ Verificador automático iniciado (30s)")
-
-    # Configurar webhook ou usar polling
-    webhook_ok = configurar_webhook()
+    print("=" * 50)
+    print("🤖 Bot Syntek Gift Cards - VERSÃO DEFINITIVA")
+    print(f"🔑 Token: {BOT_TOKEN[:20]}...")
+    print(f"🌐 Webhook: {WEBHOOK_URL}/webhook")
+    print(f"💳 Oasyfy: {OASYFY_PUBLIC_KEY[:20]}...")
+    print("=" * 50)
     
-    if webhook_ok:
-        logger.info(f"🌐 Iniciando servidor Flask na porta {PORT}...")
-        app.run(host="0.0.0.0", port=PORT, debug=False)
-    else:
-        # Polling em thread separada + Flask para health check
-        logger.info("🔄 Modo polling ativo...")
-        poll_thread = threading.Thread(target=polling_loop, daemon=True)
-        poll_thread.start()
-        # Flask para health check do Railway
-        app.run(host="0.0.0.0", port=PORT, debug=False)
+    # Inicializar banco de dados
+    init_db()
+    print("✅ Banco de dados inicializado")
+    
+    # Configurar webhook no Telegram
+    try:
+        r = requests.post(f"{TELEGRAM_API}/setWebhook",
+                          json={"url": f"{WEBHOOK_URL}/webhook", "drop_pending_updates": True},
+                          timeout=10)
+        result = r.json()
+        if result.get("ok"):
+            print(f"✅ Webhook configurado: {WEBHOOK_URL}/webhook")
+        else:
+            print(f"⚠️ Webhook: {result.get('description')}")
+    except Exception as e:
+        print(f"⚠️ Erro ao configurar webhook: {e}")
+    
+    # Iniciar verificador automático de pagamentos em background
+    t = threading.Thread(target=verificar_pagamentos_loop, daemon=True)
+    t.start()
+    print("✅ Verificador automático de pagamentos iniciado (30s)")
+    
+    print(f"🚀 Flask iniciando na porta {PORT}...")
+    app.run(host="0.0.0.0", port=PORT, debug=False)
