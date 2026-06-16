@@ -19,9 +19,14 @@ from flask import Flask, request, jsonify
 # ============================================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8684385675:AAEWxBEjfOY5sMtOUoWtelwM-SpxclNqeOY")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6462638999"))
-OASYFY_PUBLIC_KEY = os.environ.get("OASYFY_PUBLIC_KEY", "lucasandre16112000_mepr35cra5buz30k")
-OASYFY_SECRET_KEY = os.environ.get("OASYFY_SECRET_KEY", "76zh1cvrxisjub8u0txh5tygb65unatj2rmdppeohdnbfxmu8yy0idimycw3n0ze")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://worker-production-0daf.up.railway.app")
+OASYFY_PUBLIC_KEY = os.environ.get("OASYFY_CLIENT_ID", os.environ.get("OASYFY_PUBLIC_KEY", "lucasandre16112000_mepr35cra5buz30k"))
+OASYFY_SECRET_KEY = os.environ.get("OASYFY_CLIENT_SECRET", os.environ.get("OASYFY_SECRET_KEY", "76zh1cvrxisjub8u0txh5tygb65unatj2rmdppeohdnbfxmu8yy0idimycw3n0ze"))
+_webhook_raw = os.environ.get("WEBHOOK_URL", "https://web-production-45773.up.railway.app")
+# Remover /webhook do final se já estiver presente (evitar duplicação)
+if _webhook_raw.endswith("/webhook"):
+    WEBHOOK_URL = _webhook_raw[:-8]  # remove os 8 chars de "/webhook"
+else:
+    WEBHOOK_URL = _webhook_raw.rstrip("/")
 PORT = int(os.environ.get("PORT", 8080))
 SUPORTE = "@SyntekOficial"
 
