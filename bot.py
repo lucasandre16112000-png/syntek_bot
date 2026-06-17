@@ -704,19 +704,22 @@ def webhook():
                 tx_id = data.replace("copiar_pix_", "")
                 tx = buscar_transacao(tx_id)
                 if tx and tx.get("pix_code"):
-                    # Envia o código PIX em mensagem separada protegida (toque para copiar)
+                    # Envia o código PIX SEM protect_content para que o cliente consiga tocar e copiar
                     try:
+                        payload_pix = {
+                            "chat_id": chat_id,
+                            "text": f"<code>{tx['pix_code']}</code>",
+                            "parse_mode": "HTML",
+                            "protect_content": False  # Precisa estar False para permitir copia
+                        }
+                        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload_pix, timeout=10)
                         requests.post(
                             f"{TELEGRAM_API}/answerCallbackQuery",
-                            json={"callback_query_id": callback_id, "text": "📋 Toque no código abaixo para copiar!", "show_alert": False},
+                            json={"callback_query_id": callback_id, "text": "📋 Toque no código para copiar!"},
                             timeout=5
                         )
-                    except Exception:
-                        pass
-                    send_message(
-                        chat_id,
-                        f"<code>{tx['pix_code']}</code>"
-                    )
+                    except Exception as e:
+                        print(f"[BOT] Erro ao enviar código PIX: {e}")
                 else:
                     try:
                         requests.post(
