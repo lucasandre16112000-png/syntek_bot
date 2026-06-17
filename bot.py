@@ -46,8 +46,20 @@ GIFT_CARDS = {
     "ifood_500":   {"nome": "🍔 IFOOD 500",   "preco": 129.90, "prefixo": "IF5"},   # corrigido: era 229,90
     "ifood_300":   {"nome": "🍔 IFOOD 300",   "preco": 89.90,  "prefixo": "IF3"},
     "steam_300":   {"nome": "🎮 STEAM 300",   "preco": 89.00,  "prefixo": "ST3"},
-    "gplay_300":   {"nome": "🎮 GOOGLE PLAY 300", "preco": 89.00, "prefixo": "GP3"},
-    "teste_5":     {"nome": "🧪 TESTE R$5",        "preco": 5.00,  "prefixo": "TST"},
+    "gplay_300":   {"nome": "🎮 GOOGLE PLAY 300",   "preco": 89.00,  "prefixo": "GP3"},
+    "roblox_500":  {"nome": "🎮 ROBLOX 500",         "preco": 149.90, "prefixo": "RB5"},
+    "roblox_300":  {"nome": "🎮 ROBLOX 300",         "preco": 90.00,  "prefixo": "RB3"},
+    "roblox_200":  {"nome": "🎮 ROBLOX 200",         "preco": 70.00,  "prefixo": "RB2"},
+    "cbahia_1000": {"nome": "🏠 CASAS BAHIA 1000",   "preco": 299.90, "prefixo": "CB10"},
+    "cbahia_500":  {"nome": "🏠 CASAS BAHIA 500",    "preco": 149.90, "prefixo": "CB5"},
+    "cbahia_300":  {"nome": "🏠 CASAS BAHIA 300",    "preco": 90.00,  "prefixo": "CB3"},
+    "airbnb_1000": {"nome": "🏙 AIRBNB 1000",        "preco": 325.00, "prefixo": "AB10"},
+    "airbnb_500":  {"nome": "🏙 AIRBNB 500",         "preco": 160.00, "prefixo": "AB5"},
+    "airbnb_250":  {"nome": "🏙 AIRBNB 250",         "preco": 79.90,  "prefixo": "AB2"},
+    "apple_200":   {"nome": "📱 APPLE STORE 200",    "preco": 79.90,  "prefixo": "AP2"},
+    "uber_500":    {"nome": "🚕 UBER 500",            "preco": 149.90, "prefixo": "UB5"},
+    "uber_300":    {"nome": "🚕 UBER 300",            "preco": 90.00,  "prefixo": "UB3"},
+    "uber_200":    {"nome": "🚕 UBER 200",            "preco": 70.00,  "prefixo": "UB2"},
 }
 
 # ============================================================
@@ -396,31 +408,31 @@ def gerar_codigo(prefixo):
     elif prefixo in ("ST3",):
         return f"{bloco(5)}-{bloco(5)}-{bloco(5)}"
 
-    # Roblox: XXXX-XXXX-XXXX-XXXX
-    elif prefixo in ("RB3",):
+    # Roblox: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
+    elif prefixo in ("RB5", "RB3", "RB2"):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
 
     # Casas Bahia: 16 dígitos numéricos
-    elif prefixo in ("CB3",):
+    elif prefixo in ("CB10", "CB5", "CB3"):
         return bloco(16, digitos)
+
+    # Airbnb: XXXX-XXXX-XXXX (letras maiúsculas + números, formato real)
+    elif prefixo in ("AB10", "AB5", "AB2"):
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}"
+
+    # Apple Store: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
+    elif prefixo in ("AP2",):
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
+
+    # Uber: XXXXXXXXXX (10 letras+números)
+    elif prefixo in ("UB5", "UB3", "UB2"):
+        return bloco(10)
 
     # Zé Delivery: XXXX-XXXX-XXXX-XXXX
     elif prefixo in ("ZD3",):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
 
-    # Airbnb: 10 letras+números
-    elif prefixo in ("AB3",):
-        return bloco(10)
-
-    # Apple Store: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
-    elif prefixo in ("AP3",):
-        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
-
-    # Uber: XXXXXXXXXX (10 letras+números)
-    elif prefixo in ("UB3",):
-        return bloco(10)
-
-    # Teste / genérico
+    # Genérico / teste
     else:
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
 
@@ -431,15 +443,27 @@ def teclado_gift_cards():
     """Retorna o inline keyboard com todos os gift cards e botão de suporte."""
     return {
         "inline_keyboard": [
-            [{"text": "🎁 SHOPEE 1000 - R$ 299,90", "callback_data": "comprar_shopee_1000"}],
-            [{"text": "🎁 SHOPEE 500 - R$ 149,90",  "callback_data": "comprar_shopee_500"}],
-            [{"text": "🎁 SHOPEE 300 - R$ 99,90",   "callback_data": "comprar_shopee_300"}],
-            [{"text": "🍔 IFOOD 1000 - R$ 279,90",  "callback_data": "comprar_ifood_1000"}],
-            [{"text": "🍔 IFOOD 500 - R$ 129,90",   "callback_data": "comprar_ifood_500"}],
-            [{"text": "🍔 IFOOD 300 - R$ 89,90",    "callback_data": "comprar_ifood_300"}],
-            [{"text": "🎮 STEAM 300 - R$ 89,00",    "callback_data": "comprar_steam_300"}],
-            [{"text": "🎮 GOOGLE PLAY 300 - R$ 89,00", "callback_data": "comprar_gplay_300"}],
-            [{"text": "🧪 TESTE R$5 (apenas para teste)", "callback_data": "comprar_teste_5"}],
+            [{"text": "🎁 SHOPEE 1000 - R$ 299,90",      "callback_data": "comprar_shopee_1000"}],
+            [{"text": "🎁 SHOPEE 500 - R$ 149,90",       "callback_data": "comprar_shopee_500"}],
+            [{"text": "🎁 SHOPEE 300 - R$ 99,90",        "callback_data": "comprar_shopee_300"}],
+            [{"text": "🍔 IFOOD 1000 - R$ 279,90",       "callback_data": "comprar_ifood_1000"}],
+            [{"text": "🍔 IFOOD 500 - R$ 129,90",        "callback_data": "comprar_ifood_500"}],
+            [{"text": "🍔 IFOOD 300 - R$ 89,90",         "callback_data": "comprar_ifood_300"}],
+            [{"text": "🎮 STEAM 300 - R$ 89,00",         "callback_data": "comprar_steam_300"}],
+            [{"text": "🎮 GOOGLE PLAY 300 - R$ 89,00",   "callback_data": "comprar_gplay_300"}],
+            [{"text": "🎮 ROBLOX 500 - R$ 149,90",       "callback_data": "comprar_roblox_500"}],
+            [{"text": "🎮 ROBLOX 300 - R$ 90,00",        "callback_data": "comprar_roblox_300"}],
+            [{"text": "🎮 ROBLOX 200 - R$ 70,00",        "callback_data": "comprar_roblox_200"}],
+            [{"text": "🏠 CASAS BAHIA 1000 - R$ 299,90", "callback_data": "comprar_cbahia_1000"}],
+            [{"text": "🏠 CASAS BAHIA 500 - R$ 149,90",  "callback_data": "comprar_cbahia_500"}],
+            [{"text": "🏠 CASAS BAHIA 300 - R$ 90,00",   "callback_data": "comprar_cbahia_300"}],
+            [{"text": "🏙 AIRBNB 1000 - R$ 325,00",      "callback_data": "comprar_airbnb_1000"}],
+            [{"text": "🏙 AIRBNB 500 - R$ 160,00",       "callback_data": "comprar_airbnb_500"}],
+            [{"text": "🏙 AIRBNB 250 - R$ 79,90",        "callback_data": "comprar_airbnb_250"}],
+            [{"text": "📱 APPLE STORE 200 - R$ 79,90",   "callback_data": "comprar_apple_200"}],
+            [{"text": "🚕 UBER 500 - R$ 149,90",          "callback_data": "comprar_uber_500"}],
+            [{"text": "🚕 UBER 300 - R$ 90,00",           "callback_data": "comprar_uber_300"}],
+            [{"text": "🚕 UBER 200 - R$ 70,00",           "callback_data": "comprar_uber_200"}],
             [{"text": "📲 Suporte", "url": SUPORTE_URL}],
         ]
     }
