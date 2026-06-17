@@ -522,45 +522,52 @@ def verificar_pagamentos_loop():
 # ============================================================
 # ENVIO AUTOMÁTICO DE PROMOÇÃO A CADA 2 HORAS
 # ============================================================
+INTERVALO_PROMO = 120  # segundos entre cada envio (120 = 2 minutos para teste; trocar para 7200 em produção)
+
 def enviar_promocao_loop():
-    """Envia mensagem promocional a cada 2 horas para todos os usuários cadastrados."""
-    # Aguardar 2 minutos antes do primeiro envio (para teste)
-    time.sleep(120)
+    """Envia mensagem promocional a cada INTERVALO_PROMO segundos para todos os usuários cadastrados."""
+    # Aguardar o intervalo antes do primeiro envio
+    print(f"[PROMO] Primeiro envio em {INTERVALO_PROMO}s...")
+    time.sleep(INTERVALO_PROMO)
     while True:
         try:
             usuarios = buscar_todos_usuarios()
             print(f"[PROMO] Enviando promoção para {len(usuarios)} usuários...")
-            texto_promo = (
-                "✅ <b>PROMOÇÃO</b>\n\n"
-                "🔹SHOPEE  🔹IFOOD  🔹GOOGLE PLAY\n"
-                "🔹CASAS BAHIA  🔹ROBLOX  🔹STEAM\n"
-                "🔹ZÉ DELIVERY  🔹AIRBNB\n"
-                "🔹APPLE STORE  🔹UBER\n\n"
-                "Outros Gift Cards? Chame o Suporte.\n\n"
-                "❖ <b>1000 DE SALDO</b> — R$ 299,90\n"
-                "❖ <b>500 DE SALDO</b> — R$ 139,90\n"
-                "❖ <b>300 DE SALDO</b> — R$ 89,90\n\n"
-                "⚠️ É SÓ ADICIONAR E REALIZAR AS COMPRAS, NÃO TEM SEGREDO. ✅🦅🚀"
-            )
-            teclado_promo = {
-                "inline_keyboard": [
-                    [{"text": "🚀 /GIFT CARDS — Ver todos", "callback_data": "menu"}],
-                    [{"text": "📲 Suporte", "url": SUPORTE_URL}],
-                ]
-            }
-            enviados = 0
-            erros = 0
-            for chat_id in usuarios:
-                result = send_message(chat_id, texto_promo, reply_markup=teclado_promo)
-                if result and result.get("ok"):
-                    enviados += 1
-                else:
-                    erros += 1
-                time.sleep(0.05)  # Respeitar rate limit do Telegram (20 msgs/s)
-            print(f"[PROMO] Enviados: {enviados} | Erros: {erros}")
+            if not usuarios:
+                print("[PROMO] Nenhum usuário cadastrado ainda.")
+            else:
+                texto_promo = (
+                    "✅ <b>PROMOÇÃO</b>\n\n"
+                    "🔹SHOPEE  🔹IFOOD  🔹GOOGLE PLAY\n"
+                    "🔹CASAS BAHIA  🔹ROBLOX  🔹STEAM\n"
+                    "🔹ZÉ DELIVERY  🔹AIRBNB\n"
+                    "🔹APPLE STORE  🔹UBER\n\n"
+                    "Outros Gift Cards? Chame o Suporte.\n\n"
+                    "❖ <b>1000 DE SALDO</b> — R$ 299,90\n"
+                    "❖ <b>500 DE SALDO</b> — R$ 139,90\n"
+                    "❖ <b>300 DE SALDO</b> — R$ 89,90\n\n"
+                    "⚠️ É SÓ ADICIONAR E REALIZAR AS COMPRAS, NÃO TEM SEGREDO. ✅🦅🚀"
+                )
+                teclado_promo = {
+                    "inline_keyboard": [
+                        [{"text": "🚀 /GIFT CARDS — Ver todos", "callback_data": "menu"}],
+                        [{"text": "📲 Suporte", "url": SUPORTE_URL}],
+                    ]
+                }
+                enviados = 0
+                erros = 0
+                for chat_id in usuarios:
+                    result = send_message(chat_id, texto_promo, reply_markup=teclado_promo)
+                    if result and result.get("ok"):
+                        enviados += 1
+                    else:
+                        erros += 1
+                    time.sleep(0.05)  # Respeitar rate limit do Telegram (20 msgs/s)
+                print(f"[PROMO] Enviados: {enviados} | Erros: {erros}")
         except Exception as e:
             print(f"[PROMO] Erro no loop de promoção: {e}")
-        time.sleep(7200)  # Aguardar 2 horas para o próximo envio
+        print(f"[PROMO] Próximo envio em {INTERVALO_PROMO}s...")
+        time.sleep(INTERVALO_PROMO)  # Aguardar o intervalo para o próximo envio
 
 # ============================================================
 # FLASK APP - WEBHOOK
