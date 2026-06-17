@@ -428,9 +428,10 @@ def handle_comprar(chat_id, card_key, callback_id):
 
     cobranca = gerar_cobranca_pix(card["preco"], f"Gift Card {card['nome']}", tx_id)
 
-    teclado = {
+    # O teclado será montado depois que tivermos o pix_code
+    # pois o botão copy_text precisa do código PIX real
+    teclado_sem_pix = {
         "inline_keyboard": [
-            [{"text": "📋 Copiar Código PIX", "callback_data": f"copiar_pix_{tx_id}"}],
             [{"text": "📷 Ver QR Code", "callback_data": f"ver_qr_{tx_id}"}],
             [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
             [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
@@ -449,6 +450,20 @@ def handle_comprar(chat_id, card_key, callback_id):
         # Salvar código PIX e base64 no banco para uso posterior (copiar/ver QR)
         if pix_code or pix_base64:
             salvar_pix_data(tx_id, pix_code, pix_base64)
+
+        # Montar teclado com botão copy_text nativo do Telegram (copia sem enviar mensagem)
+        if pix_code:
+            teclado = {
+                "inline_keyboard": [
+                    [{"text": "📋 Copiar Código PIX", "copy_text": {"text": pix_code}}],
+                    [{"text": "📷 Ver QR Code", "callback_data": f"ver_qr_{tx_id}"}],
+                    [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
+                    [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
+                    [{"text": "💬 Suporte", "url": SUPORTE_URL}],
+                ]
+            }
+        else:
+            teclado = teclado_sem_pix
 
         caption = (
             f"📷 <b>Escaneie o QR code para Pagar:</b>\n\n"
@@ -737,13 +752,22 @@ def webhook():
                     try:
                         b64_data = tx["pix_base64"].split(",")[-1]
                         img_bytes = base64.b64decode(b64_data)
-                        teclado_qr = {
-                            "inline_keyboard": [
-                                [{"text": "📋 Copiar Código PIX", "callback_data": f"copiar_pix_{tx_id}"}],
-                                [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
-                                [{"text": "💬 Suporte", "url": SUPORTE_URL}],
-                            ]
-                        }
+                        # Botão copy_text nativo se tiver o código PIX
+                        if tx.get("pix_code"):
+                            teclado_qr = {
+                                "inline_keyboard": [
+                                    [{"text": "📋 Copiar Código PIX", "copy_text": {"text": tx["pix_code"]}}],
+                                    [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
+                                    [{"text": "💬 Suporte", "url": SUPORTE_URL}],
+                                ]
+                            }
+                        else:
+                            teclado_qr = {
+                                "inline_keyboard": [
+                                    [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
+                                    [{"text": "💬 Suporte", "url": SUPORTE_URL}],
+                                ]
+                            }
                         send_photo_bytes(chat_id, img_bytes,
                             caption=f"📷 <b>QR Code para pagamento</b>\n📋 Toque em <b>Copiar Código PIX</b> abaixo para pagar via Copia e Cola.",
                             reply_markup=teclado_qr
