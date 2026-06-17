@@ -103,19 +103,26 @@ def init_db():
             criado_em REAL
         )
     """)
-    # Migração segura: coluna oasyfy_tx_id
-    try:
-        c.execute("ALTER TABLE transacoes ADD COLUMN oasyfy_tx_id TEXT")
-    except Exception:
-        pass
+    # Migrações seguras
+    for col in ["oasyfy_tx_id TEXT", "pix_code TEXT", "pix_base64 TEXT"]:
+        try:
+            c.execute(f"ALTER TABLE transacoes ADD COLUMN {col}")
+        except Exception:
+            pass
     # Tabela de usuários (para envio automático de promoções)
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             chat_id INTEGER PRIMARY KEY,
             primeiro_nome TEXT,
-            criado_em REAL
+            criado_em REAL,
+            promo_enviada INTEGER DEFAULT 0
         )
     """)
+    # Migração segura: coluna promo_enviada
+    try:
+        c.execute("ALTER TABLE usuarios ADD COLUMN promo_enviada INTEGER DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -139,6 +146,26 @@ def buscar_todos_usuarios():
     conn.close()
     return [r[0] for r in rows]
 
+def buscar_novos_usuarios_para_promo():
+    """Retorna usuários que se cadastraram há mais de 5 minutos e ainda não receberam a primeira promoção."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT chat_id FROM usuarios WHERE promo_enviada=0 AND criado_em <= ?",
+        (time.time() - 300,)  # 300 segundos = 5 minutos
+    )
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def marcar_promo_enviada(chat_id):
+    """Marca que o usuário já recebeu a primeira promoção."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE usuarios SET promo_enviada=1 WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
 def salvar_transacao(tx_id, chat_id, card_key, valor, oasyfy_tx_id=""):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -156,17 +183,27 @@ def atualizar_oasyfy_tx_id(tx_id, oasyfy_tx_id):
     conn.commit()
     conn.close()
 
+def salvar_pix_data(tx_id, pix_code, pix_base64):
+    """Salva o código PIX e o QR code base64 da transação."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE transacoes SET pix_code=?, pix_base64=? WHERE id=?", (pix_code, pix_base64, tx_id))
+    conn.commit()
+    conn.close()
+
 def buscar_transacao(tx_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, chat_id, card_key, valor, status, codigo_gift, oasyfy_tx_id FROM transacoes WHERE id=?", (tx_id,))
+    c.execute("SELECT id, chat_id, card_key, valor, status, codigo_gift, oasyfy_tx_id, pix_code, pix_base64 FROM transacoes WHERE id=?", (tx_id,))
     row = c.fetchone()
     conn.close()
     if row:
         return {
             "id": row[0], "chat_id": row[1], "card_key": row[2],
             "valor": row[3], "status": row[4], "codigo_gift": row[5],
-            "oasyfy_tx_id": row[6] or ""
+            "oasyfy_tx_id": row[6] or "",
+            "pix_code": row[7] or "",
+            "pix_base64": row[8] or ""
         }
     return None
 
@@ -384,6 +421,8 @@ def handle_comprar(chat_id, card_key, callback_id):
 
     teclado = {
         "inline_keyboard": [
+            [{"text": "📋 Copiar Código PIX", "callback_data": f"copiar_pix_{tx_id}"}],
+            [{"text": "📷 Ver QR Code", "callback_data": f"ver_qr_{tx_id}"}],
             [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
             [{"text": "🔄 Voltar ao Menu", "callback_data": "menu"}],
             [{"text": "💬 Suporte", "url": SUPORTE_URL}],
@@ -398,6 +437,9 @@ def handle_comprar(chat_id, card_key, callback_id):
         if oasyfy_tx_id:
             atualizar_oasyfy_tx_id(tx_id, oasyfy_tx_id)
             print(f"[OASYFY] transactionId salvo: {oasyfy_tx_id}")
+        # Salvar código PIX e base64 no banco para uso posterior (copiar/ver QR)
+        if pix_code or pix_base64:
+            salvar_pix_data(tx_id, pix_code, pix_base64)
 
         caption = (
             f"📷 <b>Escaneie o QR code para Pagar:</b>\n\n"
@@ -527,52 +569,81 @@ def verificar_pagamentos_loop():
 # ============================================================
 # ENVIO AUTOMÁTICO DE PROMOÇÃO A CADA 2 HORAS
 # ============================================================
-INTERVALO_PROMO = 3600  # segundos entre cada envio (3600 = 1 hora)
+INTERVALO_PROMO = 3600  # segundos entre cada envio recorrente (3600 = 1 hora)
+PRIMEIRO_ENVIO_DELAY = 300  # segundos após cadastro para o primeiro envio (300 = 5 minutos)
+
+def _texto_e_teclado_promo():
+    """Retorna o texto e teclado da mensagem promocional."""
+    texto = (
+        "✅ <b>PROMOÇÃO</b>\n\n"
+        "🔹SHOPEE  🔹IFOOD  🔹GOOGLE PLAY\n"
+        "🔹CASAS BAHIA  🔹ROBLOX  🔹STEAM\n"
+        "🔹ZÉ DELIVERY  🔹AIRBNB\n"
+        "🔹APPLE STORE  🔹UBER\n\n"
+        "Outros Gift Cards? Chame o Suporte.\n\n"
+        "❖ <b>1000 DE SALDO</b> — R$ 299,90\n"
+        "❖ <b>500 DE SALDO</b> — R$ 139,90\n"
+        "❖ <b>300 DE SALDO</b> — R$ 89,90\n\n"
+        "⚠️ É SÓ ADICIONAR E REALIZAR AS COMPRAS, NÃO TEM SEGREDO. ✅🦅🚀"
+    )
+    teclado = {
+        "inline_keyboard": [
+            [{"text": "🚀 /GIFT CARDS — Ver todos", "callback_data": "menu"}],
+            [{"text": "📲 Suporte", "url": SUPORTE_URL}],
+        ]
+    }
+    return texto, teclado
 
 def enviar_promocao_loop():
-    """Envia mensagem promocional a cada INTERVALO_PROMO segundos para todos os usuários cadastrados."""
-    # Aguardar o intervalo antes do primeiro envio
-    print(f"[PROMO] Primeiro envio em {INTERVALO_PROMO}s...")
-    time.sleep(INTERVALO_PROMO)
+    """Loop principal de promoções:
+    - Verifica a cada 60s se há novos usuários que esperaram 5 minutos (primeiro envio)
+    - Envia para todos os usuários a cada 1 hora (envios recorrentes)
+    """
+    ultimo_envio_geral = 0  # timestamp do último envio para todos
+
     while True:
         try:
-            usuarios = buscar_todos_usuarios()
-            print(f"[PROMO] Enviando promoção para {len(usuarios)} usuários...")
-            if not usuarios:
-                print("[PROMO] Nenhum usuário cadastrado ainda.")
-            else:
-                texto_promo = (
-                    "✅ <b>PROMOÇÃO</b>\n\n"
-                    "🔹SHOPEE  🔹IFOOD  🔹GOOGLE PLAY\n"
-                    "🔹CASAS BAHIA  🔹ROBLOX  🔹STEAM\n"
-                    "🔹ZÉ DELIVERY  🔹AIRBNB\n"
-                    "🔹APPLE STORE  🔹UBER\n\n"
-                    "Outros Gift Cards? Chame o Suporte.\n\n"
-                    "❖ <b>1000 DE SALDO</b> — R$ 299,90\n"
-                    "❖ <b>500 DE SALDO</b> — R$ 139,90\n"
-                    "❖ <b>300 DE SALDO</b> — R$ 89,90\n\n"
-                    "⚠️ É SÓ ADICIONAR E REALIZAR AS COMPRAS, NÃO TEM SEGREDO. ✅🦅🚀"
-                )
-                teclado_promo = {
-                    "inline_keyboard": [
-                        [{"text": "🚀 /GIFT CARDS — Ver todos", "callback_data": "menu"}],
-                        [{"text": "📲 Suporte", "url": SUPORTE_URL}],
-                    ]
-                }
-                enviados = 0
-                erros = 0
-                for chat_id in usuarios:
-                    result = send_message(chat_id, texto_promo, reply_markup=teclado_promo)
+            agora = time.time()
+
+            # --- PRIMEIRO ENVIO: novos usuários que aguardaram 5 minutos ---
+            novos = buscar_novos_usuarios_para_promo()
+            if novos:
+                texto, teclado = _texto_e_teclado_promo()
+                print(f"[PROMO] Primeiro envio para {len(novos)} novo(s) usuário(s)...")
+                for chat_id in novos:
+                    result = send_message(chat_id, texto, reply_markup=teclado)
                     if result and result.get("ok"):
-                        enviados += 1
+                        marcar_promo_enviada(chat_id)
+                        print(f"[PROMO] Primeiro envio OK: {chat_id}")
                     else:
-                        erros += 1
-                    time.sleep(0.05)  # Respeitar rate limit do Telegram (20 msgs/s)
-                print(f"[PROMO] Enviados: {enviados} | Erros: {erros}")
+                        print(f"[PROMO] Erro primeiro envio: {chat_id}")
+                    time.sleep(0.05)
+
+            # --- ENVIO RECORRENTE: todos os usuários a cada 1 hora ---
+            if agora - ultimo_envio_geral >= INTERVALO_PROMO:
+                usuarios = buscar_todos_usuarios()
+                if usuarios:
+                    texto, teclado = _texto_e_teclado_promo()
+                    print(f"[PROMO] Envio recorrente para {len(usuarios)} usuários...")
+                    enviados = 0
+                    erros = 0
+                    for chat_id in usuarios:
+                        result = send_message(chat_id, texto, reply_markup=teclado)
+                        if result and result.get("ok"):
+                            enviados += 1
+                        else:
+                            erros += 1
+                        time.sleep(0.05)
+                    print(f"[PROMO] Recorrente: {enviados} enviados | {erros} erros")
+                    ultimo_envio_geral = agora
+                else:
+                    print("[PROMO] Nenhum usuário cadastrado ainda.")
+                    ultimo_envio_geral = agora  # evitar spam de log
+
         except Exception as e:
-            print(f"[PROMO] Erro no loop de promoção: {e}")
-        print(f"[PROMO] Próximo envio em {INTERVALO_PROMO}s...")
-        time.sleep(INTERVALO_PROMO)  # Aguardar o intervalo para o próximo envio
+            print(f"[PROMO] Erro no loop: {e}")
+
+        time.sleep(60)  # verificar a cada 60 segundos
 
 # ============================================================
 # FLASK APP - WEBHOOK
@@ -620,6 +691,42 @@ def webhook():
             elif data.startswith("verificar_"):
                 tx_id = data.replace("verificar_", "")
                 handle_verificar(chat_id, tx_id, callback_id)
+            elif data.startswith("copiar_pix_"):
+                tx_id = data.replace("copiar_pix_", "")
+                answer_callback(callback_id, "📋 Código copiado!")
+                tx = buscar_transacao(tx_id)
+                if tx and tx.get("pix_code"):
+                    send_message(chat_id,
+                        f"📋 <b>Código PIX — Copia e Cola:</b>\n\n"
+                        f"<code>{tx['pix_code']}</code>\n\n"
+                        f"⬆️ Toque no código acima para copiar automaticamente."
+                    )
+                else:
+                    send_message(chat_id, "❌ Código PIX não encontrado. Gere uma nova cobrança.")
+            elif data.startswith("ver_qr_"):
+                tx_id = data.replace("ver_qr_", "")
+                answer_callback(callback_id, "📷 Carregando QR Code...")
+                tx = buscar_transacao(tx_id)
+                if tx and tx.get("pix_base64"):
+                    try:
+                        b64_data = tx["pix_base64"].split(",")[-1]
+                        img_bytes = base64.b64decode(b64_data)
+                        teclado_qr = {
+                            "inline_keyboard": [
+                                [{"text": "📋 Copiar Código PIX", "callback_data": f"copiar_pix_{tx_id}"}],
+                                [{"text": "✅ Já paguei! Verificar", "callback_data": f"verificar_{tx_id}"}],
+                                [{"text": "💬 Suporte", "url": SUPORTE_URL}],
+                            ]
+                        }
+                        send_photo_bytes(chat_id, img_bytes,
+                            caption=f"📷 <b>QR Code para pagamento</b>\n📋 Toque em <b>Copiar Código PIX</b> abaixo para pagar via Copia e Cola.",
+                            reply_markup=teclado_qr
+                        )
+                    except Exception as e:
+                        print(f"[BOT] Erro ao enviar QR: {e}")
+                        send_message(chat_id, "❌ Erro ao carregar QR Code. Use o código Copia e Cola.")
+                else:
+                    send_message(chat_id, "❌ QR Code não disponível. Gere uma nova cobrança.")
         return jsonify({"ok": True})
     except Exception as e:
         print(f"[WEBHOOK] ERRO: {e}")
