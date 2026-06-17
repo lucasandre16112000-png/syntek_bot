@@ -400,12 +400,17 @@ def handle_comprar(chat_id, card_key, callback_id):
             print(f"[OASYFY] transactionId salvo: {oasyfy_tx_id}")
 
         caption = (
-            f"💳 <b>PAGAMENTO PIX</b>\n\n"
+            f"📷 <b>Escaneie o QR code para Pagar:</b>\n\n"
             f"🎁 Produto: <b>{card['nome']}</b>\n"
             f"💰 Valor: <b>R$ {card['preco']:.2f}</b>\n\n"
-            f"📋 <b>Chave PIX (Copia e Cola):</b>\n"
+            f"✅ <b>Como realizar o pagamento:</b>\n"
+            f"1. Abra o aplicativo do seu banco.\n"
+            f"2. Selecione a opção <b>\"Pagar\"</b> ou <b>\"PIX\"</b>.\n"
+            f"3. Escolha <b>\"PIX Copia e Cola\"</b>.\n"
+            f"4. Cole a chave que está abaixo e finalize o pagamento com segurança.\n\n"
+            f"📋 <b>Copie o código abaixo:</b>\n"
             f"<code>{pix_code if pix_code else 'Aguardando...'}</code>\n\n"
-            f"⏳ Após o pagamento, o código será entregue automaticamente!\n"
+            f"⏳ Após o pagamento, o código do Gift Card será entregue automaticamente!\n"
             f"🔄 ID: <code>{tx_id}</code>"
         )
 
