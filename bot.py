@@ -47,6 +47,7 @@ GIFT_CARDS = {
     "ifood_300":   {"nome": "🍔 IFOOD 300",   "preco": 89.90,  "prefixo": "IF3"},
     "steam_300":   {"nome": "🎮 STEAM 300",   "preco": 89.00,  "prefixo": "ST3"},
     "gplay_300":   {"nome": "🎮 GOOGLE PLAY 300", "preco": 89.00, "prefixo": "GP3"},
+    "teste_10":    {"nome": "🧪 TESTE R$10",       "preco": 10.00, "prefixo": "TST"},
 }
 
 # ============================================================
@@ -381,6 +382,7 @@ def teclado_gift_cards():
             [{"text": "🍔 IFOOD 300 - R$ 89,90",    "callback_data": "comprar_ifood_300"}],
             [{"text": "🎮 STEAM 300 - R$ 89,00",    "callback_data": "comprar_steam_300"}],
             [{"text": "🎮 GOOGLE PLAY 300 - R$ 89,00", "callback_data": "comprar_gplay_300"}],
+            [{"text": "🧪 TESTE R$10 (apenas para teste)", "callback_data": "comprar_teste_10"}],
             [{"text": "📲 Suporte", "url": SUPORTE_URL}],
         ]
     }
