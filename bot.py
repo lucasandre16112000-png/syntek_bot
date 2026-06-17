@@ -522,7 +522,7 @@ def verificar_pagamentos_loop():
 # ============================================================
 # ENVIO AUTOMÁTICO DE PROMOÇÃO A CADA 2 HORAS
 # ============================================================
-INTERVALO_PROMO = 120  # segundos entre cada envio (120 = 2 minutos para teste; trocar para 7200 em produção)
+INTERVALO_PROMO = 3600  # segundos entre cada envio (3600 = 1 hora)
 
 def enviar_promocao_loop():
     """Envia mensagem promocional a cada INTERVALO_PROMO segundos para todos os usuários cadastrados."""
