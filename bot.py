@@ -367,11 +367,62 @@ def verificar_pagamento_oasyfy(oasyfy_tx_id):
         return False
 
 # ============================================================
-# GERADOR DE CÓDIGO GIFT CARD
+# GERADOR DE CÓDIGO GIFT CARD — FORMATO REAL POR PRODUTO
 # ============================================================
+import string as _string
+
 def gerar_codigo(prefixo):
-    nums = ''.join(random.choices(string.digits, k=12))
-    return f"{prefixo}-{nums[:4]}-{nums[4:8]}-{nums[8:12]}"
+    """Gera código no formato real de cada gift card com base no prefixo."""
+    letras = _string.ascii_uppercase
+    digitos = _string.digits
+    alfanum = letras + digitos
+
+    def bloco(n, chars=alfanum):
+        return ''.join(random.choices(chars, k=n))
+
+    # Shopee: 16 dígitos numéricos
+    if prefixo in ("SH10", "SH5", "SH3"):
+        return bloco(16, digitos)
+
+    # iFood: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
+    elif prefixo in ("IF10", "IF5", "IF3"):
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
+
+    # Google Play: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
+    elif prefixo in ("GP3",):
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
+
+    # Steam: XXXXX-XXXXX-XXXXX (letras maiúsculas + números)
+    elif prefixo in ("ST3",):
+        return f"{bloco(5)}-{bloco(5)}-{bloco(5)}"
+
+    # Roblox: XXXX-XXXX-XXXX-XXXX
+    elif prefixo in ("RB3",):
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
+
+    # Casas Bahia: 16 dígitos numéricos
+    elif prefixo in ("CB3",):
+        return bloco(16, digitos)
+
+    # Zé Delivery: XXXX-XXXX-XXXX-XXXX
+    elif prefixo in ("ZD3",):
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
+
+    # Airbnb: 10 letras+números
+    elif prefixo in ("AB3",):
+        return bloco(10)
+
+    # Apple Store: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
+    elif prefixo in ("AP3",):
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
+
+    # Uber: XXXXXXXXXX (10 letras+números)
+    elif prefixo in ("UB3",):
+        return bloco(10)
+
+    # Teste / genérico
+    else:
+        return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
 
 # ============================================================
 # TECLADO PADRÃO DE GIFT CARDS
