@@ -333,7 +333,10 @@ def gerar_cobranca_pix(valor, descricao, tx_id):
 # OASYFY — VERIFICAR PAGAMENTO
 # ============================================================
 def verificar_pagamento_oasyfy(oasyfy_tx_id):
-    """Verifica se o pagamento foi confirmado usando o transactionId da Oasyfy."""
+    """Verifica se o pagamento foi confirmado usando o transactionId da Oasyfy.
+    Endpoint correto: GET /transactions?id={transactionId}
+    Status de pagamento confirmado: PAID
+    """
     if not oasyfy_tx_id:
         print("[OASYFY] oasyfy_tx_id vazio — não é possível verificar")
         return False
@@ -343,18 +346,21 @@ def verificar_pagamento_oasyfy(oasyfy_tx_id):
         "x-secret-key": OASYFY_SECRET_KEY
     }
     try:
-        r = requests.get(url, params={"transactionId": oasyfy_tx_id}, headers=headers, timeout=10)
-        print(f"[OASYFY] Verificação status: {r.status_code} | Resposta: {r.text[:200]}")
+        # Parâmetro correto é 'id', não 'transactionId'
+        r = requests.get(url, params={"id": oasyfy_tx_id}, headers=headers, timeout=10)
+        print(f"[OASYFY] Verificação status: {r.status_code} | Resposta: {r.text[:300]}")
         if r.status_code == 200:
             data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                status = data[0].get("status", "").upper()
-            elif isinstance(data, dict):
+            # Resposta é um objeto direto (não lista)
+            if isinstance(data, dict):
                 status = data.get("status", "").upper()
+            elif isinstance(data, list) and len(data) > 0:
+                status = data[0].get("status", "").upper()
             else:
+                print(f"[OASYFY] Resposta inesperada: {data}")
                 return False
             print(f"[OASYFY] Status pagamento {oasyfy_tx_id}: {status}")
-            return status in ["PAID", "APPROVED", "COMPLETED", "CONFIRMED"]
+            return status in ["PAID", "APPROVED", "COMPLETED", "CONFIRMED", "COMPLETE"]
         return False
     except Exception as e:
         print(f"[OASYFY] Erro verificação: {e}")
