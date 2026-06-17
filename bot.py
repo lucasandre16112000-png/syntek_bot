@@ -232,7 +232,12 @@ def buscar_pendentes():
 # TELEGRAM API
 # ============================================================
 def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "protect_content": True  # Bloqueia prints e encaminhamento
+    }
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     try:
@@ -245,7 +250,11 @@ def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
 def send_photo_bytes(chat_id, img_bytes, caption=None, reply_markup=None):
     """Envia foto como bytes (para QR code em base64)."""
     files = {"photo": ("qrcode.png", img_bytes, "image/png")}
-    data = {"chat_id": chat_id, "parse_mode": "HTML"}
+    data = {
+        "chat_id": chat_id,
+        "parse_mode": "HTML",
+        "protect_content": "true"  # Bloqueia prints e encaminhamento
+    }
     if caption:
         data["caption"] = caption
     if reply_markup:
@@ -693,16 +702,30 @@ def webhook():
                 handle_verificar(chat_id, tx_id, callback_id)
             elif data.startswith("copiar_pix_"):
                 tx_id = data.replace("copiar_pix_", "")
-                answer_callback(callback_id, "📋 Código copiado!")
                 tx = buscar_transacao(tx_id)
                 if tx and tx.get("pix_code"):
-                    send_message(chat_id,
-                        f"📋 <b>Código PIX — Copia e Cola:</b>\n\n"
-                        f"<code>{tx['pix_code']}</code>\n\n"
-                        f"⬆️ Toque no código acima para copiar automaticamente."
+                    # Envia o código PIX em mensagem separada protegida (toque para copiar)
+                    try:
+                        requests.post(
+                            f"{TELEGRAM_API}/answerCallbackQuery",
+                            json={"callback_query_id": callback_id, "text": "📋 Toque no código abaixo para copiar!", "show_alert": False},
+                            timeout=5
+                        )
+                    except Exception:
+                        pass
+                    send_message(
+                        chat_id,
+                        f"<code>{tx['pix_code']}</code>"
                     )
                 else:
-                    send_message(chat_id, "❌ Código PIX não encontrado. Gere uma nova cobrança.")
+                    try:
+                        requests.post(
+                            f"{TELEGRAM_API}/answerCallbackQuery",
+                            json={"callback_query_id": callback_id, "text": "❌ Código PIX não encontrado.", "show_alert": True},
+                            timeout=5
+                        )
+                    except Exception:
+                        pass
             elif data.startswith("ver_qr_"):
                 tx_id = data.replace("ver_qr_", "")
                 answer_callback(callback_id, "📷 Carregando QR Code...")
