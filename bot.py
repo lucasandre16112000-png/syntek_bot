@@ -883,18 +883,18 @@ def webhook():
 # ============================================================
 # INICIALIZAÇÃO (roda uma única vez — compatível com Gunicorn)
 # ============================================================
+_init_done = threading.Event()
+_init_lock = threading.Lock()
+
 def _inicializar():
     """Inicializa banco, webhook, comandos e threads de background.
     Usa lock de arquivo para garantir que só 1 worker do Gunicorn execute isso.
     """
-    import fcntl
-    lock_file = "/tmp/syntek_init.lock"
-    try:
-        lf = open(lock_file, "w")
-        fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except IOError:
-        print("[INIT] Outro worker já inicializou. Pulando.")
-        return
+    with _init_lock:
+        if _init_done.is_set():
+            print("[INIT] Já inicializado. Pulando.")
+            return
+        _init_done.set()
 
     print("=" * 50)
     print("🤖 Bot Syntek Gift Cards - v4")
