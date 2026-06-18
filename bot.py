@@ -29,7 +29,7 @@ else:
 PORT = int(os.environ.get("PORT", 8080))
 SUPORTE = "@SyntekOficial"
 SUPORTE_URL = "https://t.me/SyntekOficial"
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:GdToRdGtDCTYGPpCLFzSMGPofJfNUzpR@thomas.proxy.rlwy.net:58421/railway")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
