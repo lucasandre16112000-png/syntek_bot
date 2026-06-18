@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
 """
-Bot Syntek Gift Cards - VERSÃO v3
+Bot Syntek Gift Cards - VERSÃO v4
 Webhook Flask + Oasyfy PIX + Entrega após pagamento
-Melhorias: emojis nos comandos, preços corrigidos, suporte automático,
-           texto de boas-vindas melhorado, envio promocional a cada 2h
+v4: PostgreSQL (fallback SQLite) + Gunicorn multi-worker
 """
 
 import os
@@ -11,7 +9,6 @@ import json
 import time
 import random
 import string
-import sqlite3
 import threading
 import base64
 import requests
@@ -32,18 +29,19 @@ else:
 PORT = int(os.environ.get("PORT", 8080))
 SUPORTE = "@SyntekOficial"
 SUPORTE_URL = "https://t.me/SyntekOficial"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # ============================================================
-# GIFT CARDS (preços corrigidos)
+# GIFT CARDS
 # ============================================================
 GIFT_CARDS = {
     "shopee_1000": {"nome": "🎁 SHOPEE 1000", "preco": 299.90, "prefixo": "SH10"},
-    "shopee_500":  {"nome": "🎁 SHOPEE 500",  "preco": 149.90, "prefixo": "SH5"},   # corrigido: era 249,90
+    "shopee_500":  {"nome": "🎁 SHOPEE 500",  "preco": 149.90, "prefixo": "SH5"},
     "shopee_300":  {"nome": "🎁 SHOPEE 300",  "preco": 99.90,  "prefixo": "SH3"},
     "ifood_1000":  {"nome": "🍔 IFOOD 1000",  "preco": 279.90, "prefixo": "IF10"},
-    "ifood_500":   {"nome": "🍔 IFOOD 500",   "preco": 129.90, "prefixo": "IF5"},   # corrigido: era 229,90
+    "ifood_500":   {"nome": "🍔 IFOOD 500",   "preco": 129.90, "prefixo": "IF5"},
     "ifood_300":   {"nome": "🍔 IFOOD 300",   "preco": 89.90,  "prefixo": "IF3"},
     "steam_300":   {"nome": "🎮 STEAM 300",   "preco": 89.00,  "prefixo": "ST3"},
     "gplay_300":   {"nome": "🎮 GOOGLE PLAY 300",   "preco": 89.00,  "prefixo": "GP3"},
@@ -76,7 +74,6 @@ _DDDS = ["11", "21", "31", "41", "51", "61", "71", "81", "85", "92",
          "19", "27", "47", "48", "62", "63", "65", "66", "67", "68"]
 
 def _gerar_cpf_valido():
-    """Gera CPF com dígitos verificadores matematicamente válidos."""
     n = [random.randint(0, 9) for _ in range(9)]
     s = sum((10 - i) * n[i] for i in range(9))
     d1 = 0 if (s % 11) < 2 else 11 - (s % 11)
@@ -87,7 +84,6 @@ def _gerar_cpf_valido():
     return "".join(map(str, n))
 
 def gerar_dados_cliente():
-    """Gera dados fictícios aleatórios com CPF matematicamente válido para cada cobrança."""
     nome = random.choice(_NOMES)
     ddd = random.choice(_DDDS)
     fone = f"{ddd}9{''.join([str(random.randint(0, 9)) for _ in range(8)])}"
@@ -96,120 +92,207 @@ def gerar_dados_cliente():
     return {"name": nome, "document": cpf, "email": email, "phone": fone}
 
 # ============================================================
-# BANCO DE DADOS
+# BANCO DE DADOS — PostgreSQL com fallback para SQLite
 # ============================================================
-DB_PATH = "/tmp/syntek_bot.db"
+_USE_PG = bool(DATABASE_URL)
+
+if _USE_PG:
+    import psycopg2
+    import psycopg2.pool
+    from psycopg2.extras import RealDictCursor
+    _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+        minconn=2, maxconn=20, dsn=DATABASE_URL
+    )
+    print(f"[DB] Usando PostgreSQL (pool 2-20 conexões)")
+
+    def _get_conn():
+        return _pg_pool.getconn()
+
+    def _put_conn(conn):
+        _pg_pool.putconn(conn)
+
+    def _ph():
+        """Placeholder para PostgreSQL: %s"""
+        return "%s"
+else:
+    import sqlite3
+    DB_PATH = "/tmp/syntek_bot.db"
+    _sqlite_lock = threading.Lock()
+    print(f"[DB] Usando SQLite: {DB_PATH}")
+
+    def _get_conn():
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _put_conn(conn):
+        conn.close()
+
+    def _ph():
+        """Placeholder para SQLite: ?"""
+        return "?"
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    # Tabela de transações
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS transacoes (
-            id TEXT PRIMARY KEY,
-            chat_id INTEGER,
-            card_key TEXT,
-            valor REAL,
-            status TEXT DEFAULT 'pendente',
-            codigo_gift TEXT,
-            oasyfy_tx_id TEXT,
-            criado_em REAL
-        )
-    """)
-    # Migrações seguras
-    for col in ["oasyfy_tx_id TEXT", "pix_code TEXT", "pix_base64 TEXT"]:
-        try:
-            c.execute(f"ALTER TABLE transacoes ADD COLUMN {col}")
-        except Exception:
-            pass
-    # Tabela de usuários (para envio automático de promoções)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            chat_id INTEGER PRIMARY KEY,
-            primeiro_nome TEXT,
-            criado_em REAL,
-            promo_enviada INTEGER DEFAULT 0
-        )
-    """)
-    # Migração segura: coluna promo_enviada
+    conn = _get_conn()
     try:
-        c.execute("ALTER TABLE usuarios ADD COLUMN promo_enviada INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    conn.commit()
-    conn.close()
+        if _USE_PG:
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS transacoes (
+                    id TEXT PRIMARY KEY,
+                    chat_id BIGINT,
+                    card_key TEXT,
+                    valor FLOAT,
+                    status TEXT DEFAULT 'pendente',
+                    codigo_gift TEXT,
+                    oasyfy_tx_id TEXT,
+                    pix_code TEXT,
+                    pix_base64 TEXT,
+                    criado_em FLOAT
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios (
+                    chat_id BIGINT PRIMARY KEY,
+                    primeiro_nome TEXT,
+                    criado_em FLOAT,
+                    promo_enviada INTEGER DEFAULT 0
+                )
+            """)
+            # Migrações seguras para colunas novas
+            for col_def in [
+                "ALTER TABLE transacoes ADD COLUMN IF NOT EXISTS oasyfy_tx_id TEXT",
+                "ALTER TABLE transacoes ADD COLUMN IF NOT EXISTS pix_code TEXT",
+                "ALTER TABLE transacoes ADD COLUMN IF NOT EXISTS pix_base64 TEXT",
+                "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS promo_enviada INTEGER DEFAULT 0",
+            ]:
+                try:
+                    c.execute(col_def)
+                except Exception:
+                    pass
+        else:
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS transacoes (
+                    id TEXT PRIMARY KEY,
+                    chat_id INTEGER,
+                    card_key TEXT,
+                    valor REAL,
+                    status TEXT DEFAULT 'pendente',
+                    codigo_gift TEXT,
+                    oasyfy_tx_id TEXT,
+                    criado_em REAL
+                )
+            """)
+            for col in ["oasyfy_tx_id TEXT", "pix_code TEXT", "pix_base64 TEXT"]:
+                try:
+                    c.execute(f"ALTER TABLE transacoes ADD COLUMN {col}")
+                except Exception:
+                    pass
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios (
+                    chat_id INTEGER PRIMARY KEY,
+                    primeiro_nome TEXT,
+                    criado_em REAL,
+                    promo_enviada INTEGER DEFAULT 0
+                )
+            """)
+            try:
+                c.execute("ALTER TABLE usuarios ADD COLUMN promo_enviada INTEGER DEFAULT 0")
+            except Exception:
+                pass
+        conn.commit()
+        print("[DB] Banco inicializado com sucesso")
+    finally:
+        _put_conn(conn)
+
+def _exec(query, params=(), fetch=None):
+    """Executa query de forma thread-safe para ambos os bancos."""
+    if not _USE_PG:
+        with _sqlite_lock:
+            conn = _get_conn()
+            try:
+                c = conn.cursor()
+                c.execute(query, params)
+                conn.commit()
+                if fetch == "one":
+                    return c.fetchone()
+                if fetch == "all":
+                    return c.fetchall()
+                return None
+            finally:
+                _put_conn(conn)
+    else:
+        conn = _get_conn()
+        try:
+            c = conn.cursor()
+            c.execute(query, params)
+            conn.commit()
+            if fetch == "one":
+                return c.fetchone()
+            if fetch == "all":
+                return c.fetchall()
+            return None
+        finally:
+            _put_conn(conn)
 
 def registrar_usuario(chat_id, primeiro_nome):
-    """Registra ou atualiza um usuário no banco."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "INSERT OR IGNORE INTO usuarios (chat_id, primeiro_nome, criado_em) VALUES (?,?,?)",
-        (chat_id, primeiro_nome, time.time())
-    )
-    conn.commit()
-    conn.close()
+    ph = _ph()
+    if _USE_PG:
+        _exec(
+            f"INSERT INTO usuarios (chat_id, primeiro_nome, criado_em) VALUES ({ph},{ph},{ph}) ON CONFLICT (chat_id) DO NOTHING",
+            (chat_id, primeiro_nome, time.time())
+        )
+    else:
+        _exec(
+            f"INSERT OR IGNORE INTO usuarios (chat_id, primeiro_nome, criado_em) VALUES ({ph},{ph},{ph})",
+            (chat_id, primeiro_nome, time.time())
+        )
 
 def buscar_todos_usuarios():
-    """Retorna lista de todos os chat_ids cadastrados."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT chat_id FROM usuarios")
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
+    rows = _exec("SELECT chat_id FROM usuarios", fetch="all")
+    return [r[0] for r in rows] if rows else []
 
 def buscar_novos_usuarios_para_promo():
-    """Retorna usuários que se cadastraram há mais de 5 minutos e ainda não receberam a primeira promoção."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "SELECT chat_id FROM usuarios WHERE promo_enviada=0 AND criado_em <= ?",
-        (time.time() - 300,)  # 300 segundos = 5 minutos
+    ph = _ph()
+    rows = _exec(
+        f"SELECT chat_id FROM usuarios WHERE promo_enviada=0 AND criado_em <= {ph}",
+        (time.time() - 300,),
+        fetch="all"
     )
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
+    return [r[0] for r in rows] if rows else []
 
 def marcar_promo_enviada(chat_id):
-    """Marca que o usuário já recebeu a primeira promoção."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE usuarios SET promo_enviada=1 WHERE chat_id=?", (chat_id,))
-    conn.commit()
-    conn.close()
+    ph = _ph()
+    _exec(f"UPDATE usuarios SET promo_enviada=1 WHERE chat_id={ph}", (chat_id,))
 
 def salvar_transacao(tx_id, chat_id, card_key, valor, oasyfy_tx_id=""):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "INSERT OR REPLACE INTO transacoes (id, chat_id, card_key, valor, status, oasyfy_tx_id, criado_em) VALUES (?,?,?,?,?,?,?)",
-        (tx_id, chat_id, card_key, valor, "pendente", oasyfy_tx_id, time.time())
-    )
-    conn.commit()
-    conn.close()
+    ph = _ph()
+    if _USE_PG:
+        _exec(
+            f"INSERT INTO transacoes (id, chat_id, card_key, valor, status, oasyfy_tx_id, criado_em) VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph}) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status",
+            (tx_id, chat_id, card_key, valor, "pendente", oasyfy_tx_id, time.time())
+        )
+    else:
+        _exec(
+            f"INSERT OR REPLACE INTO transacoes (id, chat_id, card_key, valor, status, oasyfy_tx_id, criado_em) VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            (tx_id, chat_id, card_key, valor, "pendente", oasyfy_tx_id, time.time())
+        )
 
 def atualizar_oasyfy_tx_id(tx_id, oasyfy_tx_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE transacoes SET oasyfy_tx_id=? WHERE id=?", (oasyfy_tx_id, tx_id))
-    conn.commit()
-    conn.close()
+    ph = _ph()
+    _exec(f"UPDATE transacoes SET oasyfy_tx_id={ph} WHERE id={ph}", (oasyfy_tx_id, tx_id))
 
 def salvar_pix_data(tx_id, pix_code, pix_base64):
-    """Salva o código PIX e o QR code base64 da transação."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE transacoes SET pix_code=?, pix_base64=? WHERE id=?", (pix_code, pix_base64, tx_id))
-    conn.commit()
-    conn.close()
+    ph = _ph()
+    _exec(f"UPDATE transacoes SET pix_code={ph}, pix_base64={ph} WHERE id={ph}", (pix_code, pix_base64, tx_id))
 
 def buscar_transacao(tx_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT id, chat_id, card_key, valor, status, codigo_gift, oasyfy_tx_id, pix_code, pix_base64 FROM transacoes WHERE id=?", (tx_id,))
-    row = c.fetchone()
-    conn.close()
+    ph = _ph()
+    row = _exec(
+        f"SELECT id, chat_id, card_key, valor, status, codigo_gift, oasyfy_tx_id, pix_code, pix_base64 FROM transacoes WHERE id={ph}",
+        (tx_id,), fetch="one"
+    )
     if row:
         return {
             "id": row[0], "chat_id": row[1], "card_key": row[2],
@@ -221,25 +304,19 @@ def buscar_transacao(tx_id):
     return None
 
 def atualizar_status(tx_id, status, codigo=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    ph = _ph()
     if codigo:
-        c.execute("UPDATE transacoes SET status=?, codigo_gift=? WHERE id=?", (status, codigo, tx_id))
+        _exec(f"UPDATE transacoes SET status={ph}, codigo_gift={ph} WHERE id={ph}", (status, codigo, tx_id))
     else:
-        c.execute("UPDATE transacoes SET status=? WHERE id=?", (status, tx_id))
-    conn.commit()
-    conn.close()
+        _exec(f"UPDATE transacoes SET status={ph} WHERE id={ph}", (status, tx_id))
 
 def buscar_pendentes():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "SELECT id, chat_id, card_key, valor, oasyfy_tx_id FROM transacoes WHERE status='pendente' AND criado_em > ?",
-        (time.time() - 3600,)
+    ph = _ph()
+    rows = _exec(
+        f"SELECT id, chat_id, card_key, valor, oasyfy_tx_id FROM transacoes WHERE status='pendente' AND criado_em > {ph}",
+        (time.time() - 3600,), fetch="all"
     )
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    return rows if rows else []
 
 # ============================================================
 # TELEGRAM API
@@ -249,7 +326,7 @@ def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
         "chat_id": chat_id,
         "text": text,
         "parse_mode": parse_mode,
-        "protect_content": True  # Bloqueia prints e encaminhamento
+        "protect_content": True
     }
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
@@ -261,13 +338,8 @@ def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
         return None
 
 def send_photo_bytes(chat_id, img_bytes, caption=None, reply_markup=None):
-    """Envia foto como bytes (para QR code em base64)."""
     files = {"photo": ("qrcode.png", img_bytes, "image/png")}
-    data = {
-        "chat_id": chat_id,
-        "parse_mode": "HTML",
-        "protect_content": "true"  # Bloqueia prints e encaminhamento
-    }
+    data = {"chat_id": chat_id, "parse_mode": "HTML", "protect_content": "true"}
     if caption:
         data["caption"] = caption
     if reply_markup:
@@ -287,7 +359,6 @@ def answer_callback(callback_id, text=""):
         pass
 
 def registrar_comandos():
-    """Registra os comandos /start e /suporte com emojis no BotFather via setMyCommands."""
     try:
         r = requests.post(
             f"{TELEGRAM_API}/setMyCommands",
@@ -299,7 +370,7 @@ def registrar_comandos():
         )
         result = r.json()
         if result.get("ok"):
-            print("✅ Comandos /start 🚀 e /suporte 💬 registrados no Telegram")
+            print("✅ Comandos /start 🚀 e /suporte 💬 registrados")
         else:
             print(f"⚠️ setMyCommands: {result.get('description')}")
     except Exception as e:
@@ -309,7 +380,6 @@ def registrar_comandos():
 # OASYFY — GERAR COBRANÇA PIX
 # ============================================================
 def gerar_cobranca_pix(valor, descricao, tx_id):
-    """Gera cobrança PIX via Oasyfy com payload correto."""
     url = "https://app.oasyfy.com/api/v1/gateway/pix/receive"
     headers = {
         "x-public-key": OASYFY_PUBLIC_KEY,
@@ -345,12 +415,7 @@ def gerar_cobranca_pix(valor, descricao, tx_id):
 # OASYFY — VERIFICAR PAGAMENTO
 # ============================================================
 def verificar_pagamento_oasyfy(oasyfy_tx_id):
-    """Verifica se o pagamento foi confirmado usando o transactionId da Oasyfy.
-    Endpoint correto: GET /transactions?id={transactionId}
-    Status de pagamento confirmado: PAID
-    """
     if not oasyfy_tx_id:
-        print("[OASYFY] oasyfy_tx_id vazio — não é possível verificar")
         return False
     url = "https://app.oasyfy.com/api/v1/gateway/transactions"
     headers = {
@@ -358,20 +423,17 @@ def verificar_pagamento_oasyfy(oasyfy_tx_id):
         "x-secret-key": OASYFY_SECRET_KEY
     }
     try:
-        # Parâmetro correto é 'id', não 'transactionId'
         r = requests.get(url, params={"id": oasyfy_tx_id}, headers=headers, timeout=10)
-        print(f"[OASYFY] Verificação status: {r.status_code} | Resposta: {r.text[:300]}")
+        print(f"[OASYFY] Verificação: {r.status_code} | {r.text[:300]}")
         if r.status_code == 200:
             data = r.json()
-            # Resposta é um objeto direto (não lista)
             if isinstance(data, dict):
                 status = data.get("status", "").upper()
             elif isinstance(data, list) and len(data) > 0:
                 status = data[0].get("status", "").upper()
             else:
-                print(f"[OASYFY] Resposta inesperada: {data}")
                 return False
-            print(f"[OASYFY] Status pagamento {oasyfy_tx_id}: {status}")
+            print(f"[OASYFY] Status {oasyfy_tx_id}: {status}")
             return status in ["PAID", "APPROVED", "COMPLETED", "CONFIRMED", "COMPLETE"]
         return False
     except Exception as e:
@@ -384,7 +446,6 @@ def verificar_pagamento_oasyfy(oasyfy_tx_id):
 import string as _string
 
 def gerar_codigo(prefixo):
-    """Gera código no formato real de cada gift card com base no prefixo."""
     letras = _string.ascii_uppercase
     digitos = _string.digits
     alfanum = letras + digitos
@@ -392,47 +453,26 @@ def gerar_codigo(prefixo):
     def bloco(n, chars=alfanum):
         return ''.join(random.choices(chars, k=n))
 
-    # Shopee: 16 dígitos numéricos
     if prefixo in ("SH10", "SH5", "SH3"):
         return bloco(16, digitos)
-
-    # iFood: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
     elif prefixo in ("IF10", "IF5", "IF3"):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
-
-    # Google Play: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
     elif prefixo in ("GP3",):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
-
-    # Steam: XXXXX-XXXXX-XXXXX (letras maiúsculas + números)
     elif prefixo in ("ST3",):
         return f"{bloco(5)}-{bloco(5)}-{bloco(5)}"
-
-    # Roblox: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
     elif prefixo in ("RB5", "RB3", "RB2"):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
-
-    # Casas Bahia: 16 dígitos numéricos
     elif prefixo in ("CB10", "CB5", "CB3"):
         return bloco(16, digitos)
-
-    # Airbnb: XXXX-XXXX-XXXX (letras maiúsculas + números, formato real)
     elif prefixo in ("AB10", "AB5", "AB2"):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}"
-
-    # Apple Store: XXXX-XXXX-XXXX-XXXX (letras maiúsculas + números)
     elif prefixo in ("AP2",):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
-
-    # Uber: XXXXXXXXXX (10 letras+números)
     elif prefixo in ("UB5", "UB3", "UB2"):
         return bloco(10)
-
-    # Zé Delivery: XXXX-XXXX-XXXX-XXXX
     elif prefixo in ("ZD3",):
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
-
-    # Genérico / teste
     else:
         return f"{bloco(4)}-{bloco(4)}-{bloco(4)}-{bloco(4)}"
 
@@ -440,7 +480,6 @@ def gerar_codigo(prefixo):
 # TECLADO PADRÃO DE GIFT CARDS
 # ============================================================
 def teclado_gift_cards():
-    """Retorna o inline keyboard com todos os gift cards e botão de suporte."""
     return {
         "inline_keyboard": [
             [{"text": "🎁 SHOPEE 1000 - R$ 299,90",      "callback_data": "comprar_shopee_1000"}],
@@ -485,7 +524,6 @@ def handle_start(chat_id, user_name):
     send_message(chat_id, texto, reply_markup=teclado_gift_cards())
 
 def handle_suporte(chat_id):
-    """Envia mensagem de suporte com redirecionamento automático para o chat."""
     texto = (
         f"💬 <b>SUPORTE SYNTEK</b>\n\n"
         f"Clique abaixo para falar diretamente com nosso suporte:\n"
@@ -511,8 +549,6 @@ def handle_comprar(chat_id, card_key, callback_id):
 
     cobranca = gerar_cobranca_pix(card["preco"], f"Gift Card {card['nome']}", tx_id)
 
-    # O teclado será montado depois que tivermos o pix_code
-    # pois o botão copy_text precisa do código PIX real
     teclado_sem_pix = {
         "inline_keyboard": [
             [{"text": "📷 Ver QR Code", "callback_data": f"ver_qr_{tx_id}"}],
@@ -530,11 +566,9 @@ def handle_comprar(chat_id, card_key, callback_id):
         if oasyfy_tx_id:
             atualizar_oasyfy_tx_id(tx_id, oasyfy_tx_id)
             print(f"[OASYFY] transactionId salvo: {oasyfy_tx_id}")
-        # Salvar código PIX e base64 no banco para uso posterior (copiar/ver QR)
         if pix_code or pix_base64:
             salvar_pix_data(tx_id, pix_code, pix_base64)
 
-        # Montar teclado com botão copy_text nativo do Telegram (copia sem enviar mensagem)
         if pix_code:
             teclado = {
                 "inline_keyboard": [
@@ -571,7 +605,7 @@ def handle_comprar(chat_id, card_key, callback_id):
                 result = send_photo_bytes(chat_id, img_bytes, caption=caption, reply_markup=teclado)
                 if result and result.get("ok"):
                     enviado = True
-                    print(f"[BOT] QR code enviado como imagem para chat {chat_id}")
+                    print(f"[BOT] QR code enviado para chat {chat_id}")
             except Exception as e:
                 print(f"[BOT] Erro ao decodificar base64: {e}")
 
@@ -641,11 +675,11 @@ def handle_verificar(chat_id, tx_id, callback_id):
 # VERIFICADOR AUTOMÁTICO DE PAGAMENTOS
 # ============================================================
 def verificar_pagamentos_loop():
-    """Verifica pagamentos pendentes a cada 30 segundos."""
     while True:
         try:
             pendentes = buscar_pendentes()
-            for tx_id, chat_id, card_key, valor, oasyfy_tx_id in pendentes:
+            for row in pendentes:
+                tx_id, chat_id, card_key, valor, oasyfy_tx_id = row[0], row[1], row[2], row[3], row[4]
                 if not oasyfy_tx_id:
                     continue
                 pago = verificar_pagamento_oasyfy(oasyfy_tx_id)
@@ -674,13 +708,12 @@ def verificar_pagamentos_loop():
         time.sleep(30)
 
 # ============================================================
-# ENVIO AUTOMÁTICO DE PROMOÇÃO A CADA 2 HORAS
+# ENVIO AUTOMÁTICO DE PROMOÇÃO A CADA 1 HORA
 # ============================================================
-INTERVALO_PROMO = 3600  # segundos entre cada envio recorrente (3600 = 1 hora)
-PRIMEIRO_ENVIO_DELAY = 300  # segundos após cadastro para o primeiro envio (300 = 5 minutos)
+INTERVALO_PROMO = 3600
+PRIMEIRO_ENVIO_DELAY = 300
 
 def _texto_e_teclado_promo():
-    """Retorna o texto e teclado da mensagem promocional."""
     texto = (
         "✅ <b>PROMOÇÃO</b>\n\n"
         "🔹SHOPEE  🔹IFOOD  🔹GOOGLE PLAY\n"
@@ -695,24 +728,17 @@ def _texto_e_teclado_promo():
     )
     teclado = {
         "inline_keyboard": [
-            [{"text": "🚀 /GIFT CARDS — Ver todos", "callback_data": "menu"}],
+            [{"text": "🎁 Ver Gift Cards", "callback_data": "menu"}],
             [{"text": "📲 Suporte", "url": SUPORTE_URL}],
         ]
     }
     return texto, teclado
 
 def enviar_promocao_loop():
-    """Loop principal de promoções:
-    - Verifica a cada 60s se há novos usuários que esperaram 5 minutos (primeiro envio)
-    - Envia para todos os usuários a cada 1 hora (envios recorrentes)
-    """
-    ultimo_envio_geral = 0  # timestamp do último envio para todos
-
+    ultimo_envio_geral = 0
     while True:
         try:
             agora = time.time()
-
-            # --- PRIMEIRO ENVIO: novos usuários que aguardaram 5 minutos ---
             novos = buscar_novos_usuarios_para_promo()
             if novos:
                 texto, teclado = _texto_e_teclado_promo()
@@ -722,35 +748,24 @@ def enviar_promocao_loop():
                     if result and result.get("ok"):
                         marcar_promo_enviada(chat_id)
                         print(f"[PROMO] Primeiro envio OK: {chat_id}")
-                    else:
-                        print(f"[PROMO] Erro primeiro envio: {chat_id}")
                     time.sleep(0.05)
 
-            # --- ENVIO RECORRENTE: todos os usuários a cada 1 hora ---
             if agora - ultimo_envio_geral >= INTERVALO_PROMO:
                 usuarios = buscar_todos_usuarios()
                 if usuarios:
                     texto, teclado = _texto_e_teclado_promo()
                     print(f"[PROMO] Envio recorrente para {len(usuarios)} usuários...")
                     enviados = 0
-                    erros = 0
                     for chat_id in usuarios:
                         result = send_message(chat_id, texto, reply_markup=teclado)
                         if result and result.get("ok"):
                             enviados += 1
-                        else:
-                            erros += 1
                         time.sleep(0.05)
-                    print(f"[PROMO] Recorrente: {enviados} enviados | {erros} erros")
-                    ultimo_envio_geral = agora
-                else:
-                    print("[PROMO] Nenhum usuário cadastrado ainda.")
-                    ultimo_envio_geral = agora  # evitar spam de log
-
+                    print(f"[PROMO] Recorrente: {enviados} enviados")
+                ultimo_envio_geral = agora
         except Exception as e:
             print(f"[PROMO] Erro no loop: {e}")
-
-        time.sleep(60)  # verificar a cada 60 segundos
+        time.sleep(60)
 
 # ============================================================
 # FLASK APP - WEBHOOK
@@ -759,7 +774,8 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "bot": "Syntek Gift Cards", "version": "v3"})
+    db_type = "PostgreSQL" if _USE_PG else "SQLite"
+    return jsonify({"status": "ok", "bot": "Syntek Gift Cards", "version": "v4", "db": db_type})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -767,7 +783,7 @@ def webhook():
         update = request.get_json(force=True)
         if not update:
             return jsonify({"ok": True})
-        print(f"[WEBHOOK] Update recebido: {json.dumps(update)[:200]}")
+        print(f"[WEBHOOK] Update: {json.dumps(update)[:200]}")
         if "message" in update:
             msg = update["message"]
             chat_id = msg["chat"]["id"]
@@ -780,7 +796,6 @@ def webhook():
                 registrar_usuario(chat_id, user_name)
                 handle_suporte(chat_id)
             else:
-                # Qualquer outra mensagem: registrar usuário e mostrar menu
                 registrar_usuario(chat_id, user_name)
         elif "callback_query" in update:
             cb = update["callback_query"]
@@ -802,13 +817,12 @@ def webhook():
                 tx_id = data.replace("copiar_pix_", "")
                 tx = buscar_transacao(tx_id)
                 if tx and tx.get("pix_code"):
-                    # Envia o código PIX SEM protect_content para que o cliente consiga tocar e copiar
                     try:
                         payload_pix = {
                             "chat_id": chat_id,
                             "text": f"<code>{tx['pix_code']}</code>",
                             "parse_mode": "HTML",
-                            "protect_content": False  # Precisa estar False para permitir copia
+                            "protect_content": False
                         }
                         requests.post(f"{TELEGRAM_API}/sendMessage", json=payload_pix, timeout=10)
                         requests.post(
@@ -835,7 +849,6 @@ def webhook():
                     try:
                         b64_data = tx["pix_base64"].split(",")[-1]
                         img_bytes = base64.b64decode(b64_data)
-                        # Botão copy_text nativo se tiver o código PIX
                         if tx.get("pix_code"):
                             teclado_qr = {
                                 "inline_keyboard": [
@@ -852,7 +865,7 @@ def webhook():
                                 ]
                             }
                         send_photo_bytes(chat_id, img_bytes,
-                            caption=f"📷 <b>QR Code para pagamento</b>\n📋 Toque em <b>Copiar Código PIX</b> abaixo para pagar via Copia e Cola.",
+                            caption="📷 <b>QR Code para pagamento</b>\n📋 Toque em <b>Copiar Código PIX</b> abaixo para pagar via Copia e Cola.",
                             reply_markup=teclado_qr
                         )
                     except Exception as e:
@@ -868,20 +881,30 @@ def webhook():
         return jsonify({"ok": True})
 
 # ============================================================
-# MAIN
+# INICIALIZAÇÃO (roda uma única vez — compatível com Gunicorn)
 # ============================================================
-if __name__ == "__main__":
+def _inicializar():
+    """Inicializa banco, webhook, comandos e threads de background.
+    Usa lock de arquivo para garantir que só 1 worker do Gunicorn execute isso.
+    """
+    import fcntl
+    lock_file = "/tmp/syntek_init.lock"
+    try:
+        lf = open(lock_file, "w")
+        fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print("[INIT] Outro worker já inicializou. Pulando.")
+        return
+
     print("=" * 50)
-    print("🤖 Bot Syntek Gift Cards - v3")
-    print(f"🔑 Token: {BOT_TOKEN[:20]}...")
+    print("🤖 Bot Syntek Gift Cards - v4")
+    print(f"🗄️  Banco: {'PostgreSQL' if _USE_PG else 'SQLite'}")
     print(f"🌐 Webhook: {WEBHOOK_URL}/webhook")
-    print(f"💳 Oasyfy: {OASYFY_PUBLIC_KEY[:20]}...")
     print("=" * 50)
 
     init_db()
     print("✅ Banco de dados inicializado")
 
-    # Configurar webhook do Telegram
     try:
         r = requests.post(
             f"{TELEGRAM_API}/setWebhook",
@@ -890,24 +913,28 @@ if __name__ == "__main__":
         )
         result = r.json()
         if result.get("ok"):
-            print(f"✅ Webhook configurado: {WEBHOOK_URL}/webhook")
+            print(f"✅ Webhook configurado")
         else:
             print(f"⚠️ Webhook: {result.get('description')}")
     except Exception as e:
         print(f"⚠️ Erro ao configurar webhook: {e}")
 
-    # Registrar comandos /start 🚀 e /suporte 💬 no Telegram
     registrar_comandos()
 
-    # Iniciar verificador automático de pagamentos (thread)
     t1 = threading.Thread(target=verificar_pagamentos_loop, daemon=True)
     t1.start()
-    print("✅ Verificador automático de pagamentos iniciado (30s)")
+    print("✅ Verificador automático de pagamentos iniciado")
 
-    # Iniciar loop de envio promocional a cada 2 horas (thread)
     t2 = threading.Thread(target=enviar_promocao_loop, daemon=True)
     t2.start()
-    print("✅ Loop de promoção automática iniciado (a cada 2h)")
+    print("✅ Loop de promoção automática iniciado (1h)")
 
+# Inicializa ao importar o módulo (compatível com Gunicorn preload_app)
+_inicializar()
+
+# ============================================================
+# MAIN (usado apenas para desenvolvimento local)
+# ============================================================
+if __name__ == "__main__":
     print(f"🚀 Flask iniciando na porta {PORT}...")
     app.run(host="0.0.0.0", port=PORT, debug=False)
